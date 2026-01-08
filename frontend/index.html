@@ -267,10 +267,15 @@
                 setLoading(true); setError('');
                 try {
                     const result = await api.post('/subjects/upload_syllabus/', { subject_name: subjectName, syllabus_text: syllabusText });
-                    if (result.error) { setError(result.error); }
-                    else { onSuccess(result); setSubjectName(''); setSyllabusText(''); onClose(); }
-                } catch (err) { setError('Failed to upload syllabus. Please try again.'); }
-                setLoading(false);
+                    if (result.error) { 
+                        setError(result.error);
+                        setLoading(false);
+                    }
+                    else { onSuccess(result); setSubjectName(''); setSyllabusText(''); onClose(); setLoading(false); }
+                } catch (err) { 
+                    setError('Failed to upload syllabus. Please try again.'); 
+                    setLoading(false);
+                }
             }
 
             if (!isOpen) return null;

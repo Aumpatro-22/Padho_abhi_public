@@ -314,7 +314,37 @@ Syllabus:
 {syllabus_text}
 \"\"\"
 
-Extract content...
+Return ONLY a JSON object in this exact format:
+{{
+    "subject_name": "{subject_name}",
+    "subject_code": "extracted code if present or empty string",
+    "description": "brief 1-2 sentence description of the subject",
+    "units": [
+        {{
+            "unit_number": 1,
+            "name": "Unit Name",
+            "description": "brief description of what this unit covers",
+            "topics": [
+                "Topic 1 name",
+                "Topic 2 name",
+                "Topic 3 name"
+            ]
+        }},
+        {{
+            "unit_number": 2,
+            "name": "Unit Name",
+            "topics": ["Topic 1", "Topic 2"]
+        }}
+    ]
+}}
+
+IMPORTANT RULES:
+- Each topic in the "topics" array should be a SIMPLE STRING, not an object or dictionary
+- Extract ALL units and topics from the syllabus
+- Keep topic names concise but descriptive
+- Maintain the order of units and topics as they appear
+- If unit numbers are not explicit, number them sequentially
+- Each unit should have its list of topics as an array of strings
 
 Return ONLY the JSON, no other text."""
 

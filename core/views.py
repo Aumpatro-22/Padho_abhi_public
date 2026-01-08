@@ -270,9 +270,14 @@ class SubjectViewSet(viewsets.ModelViewSet):
             units_created += 1
             
             for order, topic_name in enumerate(unit_data.get('topics', []), start=1):
+                # Handle both string topics and dict topics (in case AI returns wrong format)
+                if isinstance(topic_name, dict):
+                    # If it's a dict, try to get 'title' or 'name' field
+                    topic_name = topic_name.get('title', topic_name.get('name', str(topic_name)))
+                
                 Topic.objects.create(
                     unit=unit,
-                    name=topic_name,
+                    name=str(topic_name),
                     order=order
                 )
                 topics_created += 1
