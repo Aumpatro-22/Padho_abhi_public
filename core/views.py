@@ -105,6 +105,20 @@ def validate_string_length(value, field_name, min_len=1, max_len=255):
     return str(value)
 
 
+def update_token_usage(user, usage_data):
+    """Update user's token usage stats"""
+    if not usage_data or not user.is_authenticated:
+        return
+    
+    try:
+        profile = user.profile
+        profile.total_input_tokens += usage_data.get('input', 0)
+        profile.total_output_tokens += usage_data.get('output', 0)
+        profile.save(update_fields=['total_input_tokens', 'total_output_tokens'])
+    except Exception as e:
+        logger.error(f"Failed to update token usage for user {user.username}: {e}")
+
+
 def is_rate_limit_error(error_msg):
     """Detect if an error message corresponds to an AI rate limit/quota error"""
     if not error_msg:
@@ -154,9 +168,15 @@ class AuthViewSet(viewsets.ViewSet):
             data['has_api_key'] = bool(profile.gemini_api_key)
             data['daily_usage'] = profile.daily_ai_usage_count
             data['api_key'] = profile.gemini_api_key  # In real app, don't return this or mask it
+            data['total_input_tokens'] = profile.total_input_tokens
+            data['total_output_tokens'] = profile.total_output_tokens
+            data['estimated_cost'] = float(profile.estimated_cost)
         except:
             data['has_api_key'] = False
             data['daily_usage'] = 0
+            data['total_input_tokens'] = 0
+            data['total_output_tokens'] = 0
+            data['estimated_cost'] = 0.0
         return Response(data)
 
     @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
@@ -179,7 +199,13 @@ class AuthViewSet(viewsets.ViewSet):
 
 class SubjectViewSet(viewsets.ModelViewSet):
     queryset = Subject.objects.all()
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        return Subject.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
     
     def get_serializer_class(self):
         if self.action == 'list':
@@ -214,10 +240,12 @@ class SubjectViewSet(viewsets.ModelViewSet):
         
         # Increment usage if successful
         increment_ai_usage(request.user)
+        update_token_usage(request.user, parsed.get('usage'))
         
         # Create subject
         subject, created = Subject.objects.update_or_create(
             name=parsed.get('subject_name', subject_name),
+            user=request.user,
             defaults={
                 'code': parsed.get('subject_code', ''),
                 'description': parsed.get('description', '')
@@ -275,7 +303,7 @@ class UnitViewSet(viewsets.ModelViewSet):
     serializer_class = UnitSerializer
     
     def get_queryset(self):
-        queryset = Unit.objects.all()
+        queryset = Unit.objects.filter(subject__user=self.request.user)
         subject_id = self.request.query_params.get('subject', None)
         if subject_id:
             queryset = queryset.filter(subject_id=subject_id)
@@ -287,7 +315,7 @@ class TopicViewSet(viewsets.ModelViewSet):
     serializer_class = TopicSerializer
     
     def get_queryset(self):
-        queryset = Topic.objects.all()
+        queryset = Topic.objects.filter(unit__subject__user=self.request.user)
         unit_id = self.request.query_params.get('unit', None)
         subject_id = self.request.query_params.get('subject', None)
         if unit_id:
@@ -331,6 +359,7 @@ class TopicViewSet(viewsets.ModelViewSet):
         
         # Increment usage if successful
         increment_ai_usage(request.user)
+        update_token_usage(request.user, content.get('usage'))
 
         # Save notes
         if 'notes' in content and 'error' not in content['notes']:
@@ -391,6 +420,9 @@ class TopicViewSet(viewsets.ModelViewSet):
 class NoteViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Note.objects.all()
     serializer_class = NoteSerializer
+
+    def get_queryset(self):
+        return Note.objects.filter(topic__unit__subject__user=self.request.user)
     
     @action(detail=False, methods=['get'])
     def by_topic(self, request):
@@ -426,6 +458,7 @@ class NoteViewSet(viewsets.ReadOnlyModelViewSet):
             
             # Increment usage
             increment_ai_usage(request.user)
+            update_token_usage(request.user, notes_data.get('usage'))
 
             note = Note.objects.create(
                 topic=topic,
@@ -439,6 +472,9 @@ class NoteViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 
+    
+    def get_queryset(self):
+        return Mindmap.objects.filter(topic__unit__subject__user=self.request.user)
 class MindmapViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Mindmap.objects.all()
     serializer_class = MindmapSerializer
@@ -477,6 +513,11 @@ class MindmapViewSet(viewsets.ReadOnlyModelViewSet):
             
             # Increment usage
             increment_ai_usage(request.user)
+            update_token_usage(request.user, mindmap_data.get('usage'))
+            
+            # Remove usage metadata before saving
+            if 'usage' in mindmap_data:
+                del mindmap_data['usage']
 
             mindmap = Mindmap.objects.create(
                 topic=topic,
@@ -492,7 +533,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     serializer_class = FlashcardSerializer
     
     def get_queryset(self):
-        queryset = Flashcard.objects.all()
+        queryset = Flashcard.objects.filter(topic__unit__subject__user=self.request.user)
         topic_id = self.request.query_params.get('topic_id')
         if topic_id:
             queryset = queryset.filter(topic_id=topic_id)
@@ -527,7 +568,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
             
             flashcards_data = gemini_service.generate_flashcards(topic.name, notes_content, api_key=api_key)
 
-            if isinstance(flashcards_data, dict) and 'error' in flashcards_data:
+            if 'error' in flashcards_data:
                 err = flashcards_data['error']
                 if is_rate_limit_error(err):
                     logger.warning('AI quota exceeded generating flashcards: %s', err)
@@ -536,8 +577,9 @@ class FlashcardViewSet(viewsets.ModelViewSet):
 
             # Increment usage
             increment_ai_usage(request.user)
+            update_token_usage(request.user, flashcards_data.get('usage'))
 
-            for fc in flashcards_data:
+            for fc in flashcards_data.get('flashcards', []):
                 Flashcard.objects.create(
                     topic=topic,
                     front_text=fc.get('front', ''),
@@ -572,7 +614,7 @@ class MCQViewSet(viewsets.ModelViewSet):
     serializer_class = MCQQuestionSerializer
     
     def get_queryset(self):
-        queryset = MCQQuestion.objects.all()
+        queryset = MCQQuestion.objects.filter(topic__unit__subject__user=self.request.user)
         topic_id = self.request.query_params.get('topic_id')
         if topic_id:
             queryset = queryset.filter(topic_id=topic_id)
@@ -606,7 +648,7 @@ class MCQViewSet(viewsets.ModelViewSet):
             
             mcqs_data = gemini_service.generate_mcqs(topic.name, notes_content, api_key=api_key)
 
-            if isinstance(mcqs_data, dict) and 'error' in mcqs_data:
+            if 'error' in mcqs_data:
                 err = mcqs_data['error']
                 if is_rate_limit_error(err):
                     logger.warning('AI quota exceeded generating mcqs: %s', err)
@@ -615,8 +657,9 @@ class MCQViewSet(viewsets.ModelViewSet):
 
             # Increment usage
             increment_ai_usage(request.user)
+            update_token_usage(request.user, mcqs_data.get('usage'))
 
-            for mcq in mcqs_data:
+            for mcq in mcqs_data.get('mcqs', []):
                 options = mcq.get('options', {})
                 MCQQuestion.objects.create(
                     topic=topic,
@@ -679,7 +722,7 @@ class PYQViewSet(viewsets.ModelViewSet):
     serializer_class = PYQQuestionSerializer
     
     def get_queryset(self):
-        queryset = PYQQuestion.objects.all()
+        queryset = PYQQuestion.objects.filter(subject__user=self.request.user)
         subject_id = self.request.query_params.get('subject_id')
         topic_id = self.request.query_params.get('topic_id')
         year = self.request.query_params.get('year')
@@ -740,7 +783,14 @@ class PYQViewSet(viewsets.ModelViewSet):
         
         tagged_count = 0
         for pyq in untagged_pyqs:
-            topic_name = gemini_service.tag_pyq_to_topic(pyq.question_text, topic_names)
+            result = gemini_service.tag_pyq_to_topic(pyq.question_text, topic_names)
+            
+            if 'error' in result:
+                continue
+
+            update_token_usage(request.user, result.get('usage'))
+            topic_name = result.get('topic')
+
             if topic_name:
                 topic_name_lower = topic_name.lower().strip()
                 if topic_name_lower in topic_map:
@@ -920,7 +970,16 @@ class ChatView(APIView):
                 notes_content = notes_data.get('detailed_content', notes_data.get('summary', ''))
         
         # Get AI response
-        ai_response = gemini_service.answer_doubt(user_message, topic.name, notes_content, api_key=api_key)
+        result = gemini_service.answer_doubt(user_message, topic.name, notes_content, api_key=api_key)
+        
+        if 'error' in result:
+            err = result['error']
+            if is_rate_limit_error(err):
+                return Response({'error': err}, status=429)
+            return Response({'error': err}, status=500)
+
+        update_token_usage(request.user, result.get('usage'))
+        ai_response = result.get('answer', '')
         
         # Increment usage
         increment_ai_usage(request.user)

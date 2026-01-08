@@ -13,6 +13,22 @@ class UserProfile(models.Model):
     gemini_api_key = models.CharField(max_length=255, blank=True, null=True, help_text="User's personal Gemini API Key")
     daily_ai_usage_count = models.IntegerField(default=0)
     last_usage_date = models.DateField(default=timezone.now)
+    
+    # Token usage tracking
+    total_input_tokens = models.BigIntegerField(default=0)
+    total_output_tokens = models.BigIntegerField(default=0)
+    
+    @property
+    def total_tokens(self):
+        return self.total_input_tokens + self.total_output_tokens
+        
+    @property
+    def estimated_cost(self):
+        # Using approximate pricing for Gemini Flash (per 1M tokens)
+        # Input: $0.10, Output: $0.40 (Adjust as per actual pricing)
+        input_cost = (self.total_input_tokens / 1_000_000) * 0.10
+        output_cost = (self.total_output_tokens / 1_000_000) * 0.40
+        return round(input_cost + output_cost, 4)
 
     def __str__(self):
         return f"Profile: {self.user.username}"
@@ -29,6 +45,7 @@ def save_user_profile(sender, instance, **kwargs):
 
 class Subject(models.Model):
     """Subject like Computer Networks, OS, DBMS"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='subjects', null=True, blank=True)
     name = models.CharField(max_length=200)
     code = models.CharField(max_length=20, blank=True)
     description = models.TextField(blank=True)

@@ -850,17 +850,48 @@
 
                         {message && <div className={`p-3 rounded-lg text-sm ${message.includes('Failed') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{message}</div>}
 
-                        <div className="mt-6 pt-6 border-t grid grid-cols-2 gap-4">
-                            <div className="bg-gray-50 p-4 rounded-lg">
-                                <p className="text-sm text-gray-500">Current Status</p>
-                                <p className={`font-semibold ${status.has_api_key ? 'text-green-600' : 'text-yellow-600'}`}>
-                                    {status.has_api_key ? 'Unlimited Access (Custom Key)' : 'Limited Access (System Key)'}
-                                </p>
+                        <div className="mt-6 pt-6 border-t">
+                            <h3 className="text-lg font-semibold text-gray-800 mb-4">Account Overview</h3>
+                            <div className="grid grid-cols-2 gap-4 mb-6">
+                                <div className="bg-gray-50 p-4 rounded-lg">
+                                    <p className="text-sm text-gray-500">Current Plan</p>
+                                    <p className={`font-semibold ${status.has_api_key ? 'text-green-600' : 'text-yellow-600'}`}>
+                                        {status.has_api_key ? 'Unlimited (Custom Key)' : 'Free Tier (Limited)'}
+                                    </p>
+                                </div>
+                                <div className="bg-gray-50 p-4 rounded-lg">
+                                    <p className="text-sm text-gray-500">Daily Quota Usage</p>
+                                    <p className="font-semibold text-gray-800">{status.daily_usage} / 3 topics</p>
+                                </div>
                             </div>
-                            <div className="bg-gray-50 p-4 rounded-lg">
-                                <p className="text-sm text-gray-500">Daily Usage (System Key)</p>
-                                <p className="font-semibold text-gray-800">{status.daily_usage} / 3 topics</p>
+
+                            <h3 className="text-lg font-semibold text-gray-800 mb-4">Token Usage & Estimated Cost</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <i className="fas fa-arrow-down text-blue-500"></i>
+                                        <p className="text-sm text-blue-700 font-medium">Input Tokens</p>
+                                    </div>
+                                    <p className="text-2xl font-bold text-gray-800">{status.total_input_tokens?.toLocaleString() || 0}</p>
+                                </div>
+                                <div className="bg-green-50 p-4 rounded-lg border border-green-100">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <i className="fas fa-arrow-up text-green-500"></i>
+                                        <p className="text-sm text-green-700 font-medium">Output Tokens</p>
+                                    </div>
+                                    <p className="text-2xl font-bold text-gray-800">{status.total_output_tokens?.toLocaleString() || 0}</p>
+                                </div>
+                                <div className="bg-purple-50 p-4 rounded-lg border border-purple-100">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <i className="fas fa-tag text-purple-500"></i>
+                                        <p className="text-sm text-purple-700 font-medium">Est. Cost (USD)</p>
+                                    </div>
+                                    <p className="text-2xl font-bold text-gray-800">${status.estimated_cost?.toFixed(4) || '0.0000'}</p>
+                                </div>
                             </div>
+                            <p className="text-xs text-gray-500 mt-2">
+                                * Cost estimation based on standard market rates ($0.10/1M input, $0.40/1M output). Actual usage may be free on the Gemini Free Tier.
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -894,6 +925,7 @@
             const [mindmap, setMindmap] = React.useState(null);
             const [flashcards, setFlashcards] = React.useState([]);
             const [mcqs, setMcqs] = React.useState([]);
+            const [userProfile, setUserProfile] = React.useState(null);
 
             // Check for existing auth on mount
             React.useEffect(() => {
@@ -904,6 +936,12 @@
                 }
                 setAuthChecked(true);
             }, []);
+
+            React.useEffect(() => {
+                if (user) {
+                    api.get('/auth/profile/').then(setUserProfile).catch(console.error);
+                }
+            }, [user]);
 
             React.useEffect(() => { if (user) loadSubjects(); }, [user]);
             React.useEffect(() => { if (selectedSubject) { loadUnits(); } else { setUnits([]); setSelectedTopic(null); } }, [selectedSubject]);
@@ -927,7 +965,11 @@
             async function loadSubjects() { const data = await api.get('/subjects/'); setSubjects(Array.isArray(data) ? data : []); }
             async function loadUnits() { const data = await api.get('/subjects/' + selectedSubject.id + '/'); setUnits(data.units || []); }
             function handleSelectTopic(topic) { setSelectedTopic(topic); setActiveTab('notes'); }
-            function handleUploadSuccess(result) { loadSubjects(); if (result.subject) setSelectedSubject(result.subject); }
+            function handleUploadSuccess(result) { 
+                loadSubjects(); 
+                if (result.subject) setSelectedSubject(result.subject);
+                api.get('/auth/profile/').then(setUserProfile).catch(console.error);
+            }
             async function handleDeleteSubject(subjectId) {
                 if (!confirm('Delete this subject and all its content?')) return;
                 await api.delete('/subjects/' + subjectId + '/delete_with_content/');
@@ -976,6 +1018,23 @@
                     <Sidebar subjects={subjects} selectedSubject={selectedSubject} onSelectSubject={setSelectedSubject} units={units} selectedTopic={selectedTopic} onSelectTopic={handleSelectTopic} onUploadClick={() => setShowUploadModal(true)} onDeleteSubject={handleDeleteSubject} user={user} onLogout={handleLogout} onSettingsClick={() => { setActiveTab('settings'); setSelectedTopic(null); }} onAboutClick={() => { setActiveTab('about'); setSelectedTopic(null); }} />
                     <SyllabusUploadModal isOpen={showUploadModal} onClose={() => setShowUploadModal(false)} onSuccess={handleUploadSuccess} />
                     <div className="ml-64 p-8">
+                        {userProfile && !userProfile.has_api_key && (
+                             <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6 rounded-r-lg shadow-sm">
+                                <div className="flex">
+                                    <div className="flex-shrink-0">
+                                        <i className="fas fa-exclamation-triangle text-yellow-400"></i>
+                                    </div>
+                                    <div className="ml-3">
+                                        <p className="text-sm text-yellow-700">
+                                            <strong>Note:</strong> You are using the shared system quota ({userProfile.daily_usage}/3 topics today).
+                                            <button onClick={() => { setActiveTab('settings'); setSelectedTopic(null); }} className="font-semibold underline hover:text-yellow-800 ml-1">
+                                                Add your own Gemini API Key for unlimited access
+                                            </button>
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                         {activeTab === 'settings' ? <SettingsTab /> : activeTab === 'about' ? <AboutTab /> : (
                             subjects.length === 0 ? <WelcomeScreen onUploadClick={() => setShowUploadModal(true)} /> : (
                                 <>

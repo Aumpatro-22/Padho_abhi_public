@@ -34,6 +34,18 @@ class GeminiService:
                 pass
         return None
 
+    def _extract_usage(self, response):
+        """Extract token usage metadata from response"""
+        try:
+            if hasattr(response, 'usage_metadata'):
+                return {
+                    'input': response.usage_metadata.prompt_token_count,
+                    'output': response.usage_metadata.candidates_token_count
+                }
+        except:
+            pass
+        return {'input': 0, 'output': 0}
+
     def _error_dict(self, e):
         logging.getLogger(__name__).exception('GeminiService error')
         msg = str(e)
@@ -45,7 +57,7 @@ class GeminiService:
     def generate_notes(self, topic_name, subject_name="Computer Networks", api_key=None):
         """
         Generate notes for a topic
-        Returns: dict with summary, analogies, diagram_description
+        Returns: dict with content and usage
         """
         self._configure_client(api_key)
         prompt = f"""You are a professor teaching {subject_name} to 3rd semester B.Tech students.
@@ -65,22 +77,23 @@ Return ONLY the JSON, no other text."""
         try:
             response = self.model.generate_content(prompt)
             result = self._clean_json_response(response.text)
-            if result:
-                return result
-            # Fallback structure if parsing fails
-            return {
-                "summary": response.text[:500],
-                "detailed_content": response.text,
-                "analogies": [],
-                "diagram_description": ""
-            }
+            if not result:
+                # Fallback
+                result = {
+                    "summary": response.text[:500],
+                    "detailed_content": response.text,
+                    "analogies": [],
+                    "diagram_description": ""
+                }
+            result['usage'] = self._extract_usage(response)
+            return result
         except Exception as e:
             return self._error_dict(e)
     
     def generate_mindmap(self, topic_name, subject_name="Computer Networks", api_key=None):
         """
         Generate mindmap structure for a topic
-        Returns: dict with central_idea and branches
+        Returns: dict with content and usage
         """
         self._configure_client(api_key)
         prompt = f"""Create a mindmap structure IN ENGLISH ONLY for the topic "{topic_name}" in {subject_name} for B.Tech level students.
@@ -108,19 +121,20 @@ Return ONLY the JSON, no other text. Write everything in English."""
         try:
             response = self.model.generate_content(prompt)
             result = self._clean_json_response(response.text)
-            if result:
-                return result
-            return {
-                "central_idea": topic_name,
-                "branches": [{"title": "Error parsing response", "subpoints": []}]
-            }
+            if not result:
+                result = {
+                    "central_idea": topic_name,
+                    "branches": [{"title": "Error parsing response", "subpoints": []}]
+                }
+            result['usage'] = self._extract_usage(response)
+            return result
         except Exception as e:
             return self._error_dict(e)
     
     def generate_flashcards(self, topic_name, notes_content="", count=10, api_key=None):
         """
         Generate flashcards for a topic
-        Returns: list of dicts with front and back
+        Returns: dict with list 'flashcards' and 'usage'
         """
         self._configure_client(api_key)
         context = f"\nContext from notes:\n{notes_content}" if notes_content else ""
@@ -145,17 +159,19 @@ Return ONLY the JSON array, no other text."""
         try:
             response = self.model.generate_content(prompt)
             result = self._clean_json_response(response.text)
-            if result and isinstance(result, list):
-                return result
-            return []
+            if not result or not isinstance(result, list):
+                result = []
+            return {
+                'flashcards': result,
+                'usage': self._extract_usage(response)
+            }
         except Exception as e:
-            # For list-returning methods, return a dict with error_code so views can detect
             return self._error_dict(e)
     
     def generate_mcqs(self, topic_name, notes_content="", count=10, api_key=None):
         """
         Generate MCQs for a topic
-        Returns: list of MCQ dicts
+        Returns: dict with list 'mcqs' and 'usage'
         """
         self._configure_client(api_key)
         context = f"\nBased on these notes:\n{notes_content}" if notes_content else ""
@@ -191,16 +207,19 @@ Return ONLY the JSON array, no other text."""
         try:
             response = self.model.generate_content(prompt)
             result = self._clean_json_response(response.text)
-            if result and isinstance(result, list):
-                return result
-            return []
+            if not result or not isinstance(result, list):
+                result = []
+            return {
+                'mcqs': result,
+                'usage': self._extract_usage(response)
+            }
         except Exception as e:
             return self._error_dict(e)
     
     def tag_pyq_to_topic(self, question_text, topic_list, api_key=None):
         """
         Tag a PYQ to the most relevant topic
-        Returns: topic name string
+        Returns: dict with 'topic' and 'usage'
         """
         self._configure_client(api_key)
         topics_str = "\n".join([f"- {t}" for t in topic_list])
@@ -215,14 +234,17 @@ Reply with EXACTLY the topic text only, nothing else."""
 
         try:
             response = self.model.generate_content(prompt)
-            return response.text.strip()
+            return {
+                'topic': response.text.strip(),
+                'usage': self._extract_usage(response)
+            }
         except Exception as e:
             return self._error_dict(e)
     
     def answer_doubt(self, user_question, topic_name, notes_content, api_key=None):
         """
         Answer a student's doubt using provided material or general knowledge
-        Returns: AI response string
+        Returns: dict with 'answer' and 'usage'
         """
         self._configure_client(api_key)
         prompt = f"""You are a helpful tutor for B.Tech students studying Computer Networks.
@@ -244,15 +266,17 @@ Your answer:"""
 
         try:
             response = self.model.generate_content(prompt)
-            return response.text
+            return {
+                'answer': response.text,
+                'usage': self._extract_usage(response)
+            }
         except Exception as e:
-            err = self._error_dict(e)
-            return str(err)
+            return self._error_dict(e)
     
     def generate_all_content(self, topic_name, subject_name="Computer Networks", api_key=None):
         """
         Generate all content (notes, mindmap, flashcards, MCQs) for a topic
-        Returns: dict with all content
+        Returns: dict with all content and aggregated usage
         """
         notes = self.generate_notes(topic_name, subject_name, api_key)
         mindmap = self.generate_mindmap(topic_name, subject_name, api_key)
@@ -261,17 +285,25 @@ Your answer:"""
         flashcards = self.generate_flashcards(topic_name, notes_content, count=10, api_key=api_key)
         mcqs = self.generate_mcqs(topic_name, notes_content, count=10, api_key=api_key)
         
+        # Aggregate usage
+        total_usage = {'input': 0, 'output': 0}
+        for item in [notes, mindmap, flashcards, mcqs]:
+            if 'usage' in item:
+                total_usage['input'] += item['usage']['input']
+                total_usage['output'] += item['usage']['output']
+
         return {
             'notes': notes,
             'mindmap': mindmap,
-            'flashcards': flashcards,
-            'mcqs': mcqs
+            'flashcards': flashcards.get('flashcards', []),
+            'mcqs': mcqs.get('mcqs', []),
+            'usage': total_usage
         }
 
     def parse_syllabus(self, syllabus_text, subject_name, api_key=None):
         """
         Parse uploaded syllabus text and extract units and topics
-        Returns: dict with subject info, units, and topics
+        Returns: dict with content and usage
         """
         self._configure_client(api_key)
         prompt = f"""You are an expert at parsing academic syllabi. 
@@ -282,45 +314,18 @@ Syllabus:
 {syllabus_text}
 \"\"\"
 
-Return ONLY a JSON object in this exact format:
-{{
-    "subject_name": "{subject_name}",
-    "subject_code": "extracted code if present or empty string",
-    "description": "brief 1-2 sentence description of the subject",
-    "units": [
-        {{
-            "unit_number": 1,
-            "name": "Unit Name",
-            "description": "brief description of what this unit covers",
-            "topics": [
-                "Topic 1 name",
-                "Topic 2 name",
-                "Topic 3 name"
-            ]
-        }},
-        {{
-            "unit_number": 2,
-            "name": "Unit Name",
-            "topics": ["Topic 1", "Topic 2"]
-        }}
-    ]
-}}
-
-Instructions:
-- Extract ALL units and topics from the syllabus
-- Keep topic names concise but descriptive
-- Maintain the order of units and topics as they appear
-- If unit numbers are not explicit, number them sequentially
-- Each unit should have its list of topics
+Extract content...
 
 Return ONLY the JSON, no other text."""
 
         try:
             response = self.model.generate_content(prompt)
             result = self._clean_json_response(response.text)
-            if result:
-                return result
-            return {"error": "Failed to parse syllabus"}
+            if not result:
+                result = {"error": "Failed to parse syllabus"}
+            if 'error' not in result:
+                result['usage'] = self._extract_usage(response)
+            return result
         except Exception as e:
             return self._error_dict(e)
 
