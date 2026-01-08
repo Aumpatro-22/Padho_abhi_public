@@ -88,7 +88,7 @@ WSGI_APPLICATION = "smartstudy.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-if os.environ.get("DATABASE_URL"):
+if os.environ.get("DATABASE_URL", "").strip():
     DATABASES = {
         "default": dj_database_url.config(
             conn_max_age=600,
