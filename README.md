@@ -18,12 +18,27 @@ pip install -r requirements.txt
 ```
 
 Environment:
-- The project expects certain environment settings (e.g. GEMINI_API_KEY) used by the AI service in `core/ai_service.py`.
+- The project expects certain environment settings (e.g. `GEMINI_API_KEY`) used by the AI service in `core/ai_service.py`.
   Set these as environment variables before running the server:
 
 ```powershell
 $env:GEMINI_API_KEY = "your_api_key_here"
 ```
+
+### Database Setup (Neon PostgreSQL)
+
+This project supports PostgreSQL (recommended for production, e.g., Neon free tier) and SQLite (default for local dev).
+
+To use Neon:
+1.  Create a project on [Neon.tech](https://neon.tech).
+2.  Copy the connection string (e.g., `postgres://user:password@ep-xyz.aws.neon.tech/dbname?sslmode=require`).
+3.  Set it as an environment variable or in a `.env` file:
+
+```powershell
+$env:DATABASE_URL = "postgres://..."
+```
+
+Django will automatically use this if found; otherwise, it falls back to `db.sqlite3`.
 
 Database & Django commands:
 
