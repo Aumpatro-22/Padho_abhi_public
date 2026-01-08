@@ -1,0 +1,1051 @@
+from rest_framework import viewsets, status, permissions
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.authtoken.models import Token
+from django.contrib.auth import authenticate
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.db.models import Sum, Count, Avg
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError
+import re
+import html
+from .models import (
+    Subject, Unit, Topic, Note, Mindmap, Flashcard, FlashcardReview,
+    MCQQuestion, MCQAttempt, PYQQuestion, UserProgress, StudyPlan,
+    StudyPlanItem, ChatMessage, StudySession, UserProfile
+)
+from .serializers import (
+    SubjectSerializer, SubjectListSerializer, UnitSerializer, TopicSerializer,
+    NoteSerializer, MindmapSerializer, FlashcardSerializer, FlashcardReviewSerializer,
+    MCQQuestionSerializer, MCQQuestionListSerializer, MCQAttemptSerializer,
+    PYQQuestionSerializer, UserProgressSerializer, StudyPlanSerializer,
+    StudyPlanItemSerializer, ChatMessageSerializer, ChatRequestSerializer,
+    UserSerializer, RegisterSerializer, LoginSerializer, StudySessionSerializer
+)
+from .ai_service import gemini_service
+import logging
+from datetime import timedelta
+
+
+# === Security Helper Functions ===
+def sanitize_text(text, max_length=10000):
+    """Sanitize user input text to prevent XSS and limit length"""
+    if not text:
+        return ''
+    if not isinstance(text, str):
+        text = str(text)
+    # Limit length
+    text = text[:max_length]
+    # HTML escape to prevent XSS
+    text = html.escape(text)
+    return text
+
+logger = logging.getLogger(__name__)
+
+def check_ai_usage(user):
+    """
+    Check if user can perform AI action.
+    Returns (allowed, api_key, error_response)
+    """
+    try:
+        profile = user.profile
+    except:
+        # Should exist due to signal, but just in case
+        profile = UserProfile.objects.create(user=user)
+    
+    api_key = profile.gemini_api_key
+    
+    # If user has their own key, no limits
+    if api_key:
+        return True, api_key, None
+    
+    # Check daily limit
+    today = timezone.now().date()
+    if profile.last_usage_date != today:
+        profile.daily_ai_usage_count = 0
+        profile.last_usage_date = today
+        profile.save()
+    
+    if profile.daily_ai_usage_count >= 3:
+        return False, None, Response({
+            'error': 'Daily AI limit reached (3 topics/day). Add your own Gemini API key in settings for unlimited access.',
+            'limit_reached': True
+        }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    
+    return True, None, None
+
+def increment_ai_usage(user):
+    """Increment usage count if using system key"""
+    try:
+        profile = user.profile
+        if not profile.gemini_api_key:
+            profile.daily_ai_usage_count += 1
+            profile.save()
+    except:
+        pass
+
+def validate_positive_integer(value, field_name='value'):
+    """Validate that a value is a positive integer"""
+    try:
+        val = int(value)
+        if val < 0:
+            raise ValidationError(f'{field_name} must be a positive integer')
+        return val
+    except (TypeError, ValueError):
+        raise ValidationError(f'{field_name} must be a valid integer')
+
+def validate_string_length(value, field_name, min_len=1, max_len=255):
+    """Validate string length within bounds"""
+    if not value or len(str(value)) < min_len:
+        raise ValidationError(f'{field_name} must be at least {min_len} characters')
+    if len(str(value)) > max_len:
+        raise ValidationError(f'{field_name} must not exceed {max_len} characters')
+    return str(value)
+
+
+def is_rate_limit_error(error_msg):
+    """Detect if an error message corresponds to an AI rate limit/quota error"""
+    if not error_msg:
+        return False
+    s = str(error_msg).lower()
+    keywords = ['quota', 'rate limit', 'too many requests', '429', 'quota_exceeded', 'quota exceeded', 'rate-limited']
+    return any(k in s for k in keywords)
+
+
+class AuthViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=['post'])
+    def register(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            token, _ = Token.objects.get_or_create(user=user)
+            return Response({
+                'token': token.key,
+                'user': UserSerializer(user).data
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'])
+    def login(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = authenticate(
+                username=serializer.validated_data['username'],
+                password=serializer.validated_data['password']
+            )
+            if user:
+                token, _ = Token.objects.get_or_create(user=user)
+                return Response({
+                    'token': token.key,
+                    'user': UserSerializer(user).data
+                })
+            return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def profile(self, request):
+        data = UserSerializer(request.user).data
+        try:
+            profile = request.user.profile
+            data['has_api_key'] = bool(profile.gemini_api_key)
+            data['daily_usage'] = profile.daily_ai_usage_count
+            data['api_key'] = profile.gemini_api_key  # In real app, don't return this or mask it
+        except:
+            data['has_api_key'] = False
+            data['daily_usage'] = 0
+        return Response(data)
+
+    @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def update_api_key(self, request):
+        """Update user's Gemini API key"""
+        api_key = request.data.get('api_key', '').strip()
+        try:
+            profile = request.user.profile
+        except:
+            profile = UserProfile.objects.create(user=request.user)
+        
+        profile.gemini_api_key = api_key if api_key else None
+        profile.save()
+        
+        return Response({
+            'status': 'success',
+            'has_api_key': bool(profile.gemini_api_key)
+        })
+
+
+class SubjectViewSet(viewsets.ModelViewSet):
+    queryset = Subject.objects.all()
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return SubjectListSerializer
+        return SubjectSerializer
+    
+    @action(detail=False, methods=['post'])
+    def upload_syllabus(self, request):
+        """Upload and parse a syllabus to create subject, units, and topics"""
+        # Check usage limit
+        allowed, api_key, error_response = check_ai_usage(request.user)
+        if not allowed:
+            return error_response
+
+        syllabus_text = request.data.get('syllabus_text', '')
+        subject_name = request.data.get('subject_name', '')
+        
+        if not syllabus_text or not subject_name:
+            return Response({
+                'error': 'Both syllabus_text and subject_name are required'
+            }, status=400)
+        
+        # Parse syllabus using AI
+        parsed = gemini_service.parse_syllabus(syllabus_text, subject_name, api_key=api_key)
+
+        if 'error' in parsed:
+            err = parsed['error']
+            if is_rate_limit_error(err):
+                logger.warning('AI quota exceeded during syllabus upload: %s', err)
+                return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({'error': parsed['error']}, status=500)
+        
+        # Increment usage if successful
+        increment_ai_usage(request.user)
+        
+        # Create subject
+        subject, created = Subject.objects.update_or_create(
+            name=parsed.get('subject_name', subject_name),
+            defaults={
+                'code': parsed.get('subject_code', ''),
+                'description': parsed.get('description', '')
+            }
+        )
+        
+        # If subject exists, delete old units and topics
+        if not created:
+            subject.units.all().delete()
+        
+        # Create units and topics
+        units_created = 0
+        topics_created = 0
+        
+        for unit_data in parsed.get('units', []):
+            unit = Unit.objects.create(
+                subject=subject,
+                unit_number=unit_data.get('unit_number', units_created + 1),
+                name=unit_data.get('name', f'Unit {units_created + 1}'),
+                description=unit_data.get('description', '')
+            )
+            units_created += 1
+            
+            for order, topic_name in enumerate(unit_data.get('topics', []), start=1):
+                Topic.objects.create(
+                    unit=unit,
+                    name=topic_name,
+                    order=order
+                )
+                topics_created += 1
+        
+        return Response({
+            'status': 'success',
+            'subject': SubjectSerializer(subject).data,
+            'summary': {
+                'units_created': units_created,
+                'topics_created': topics_created
+            }
+        })
+    
+    @action(detail=True, methods=['delete'])
+    def delete_with_content(self, request, pk=None):
+        """Delete subject and all related content"""
+        subject = self.get_object()
+        subject_name = subject.name
+        subject.delete()
+        return Response({
+            'status': 'success',
+            'message': f'Subject "{subject_name}" and all related content deleted'
+        })
+
+
+class UnitViewSet(viewsets.ModelViewSet):
+    queryset = Unit.objects.all()
+    serializer_class = UnitSerializer
+    
+    def get_queryset(self):
+        queryset = Unit.objects.all()
+        subject_id = self.request.query_params.get('subject', None)
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+        return queryset
+
+
+class TopicViewSet(viewsets.ModelViewSet):
+    queryset = Topic.objects.all()
+    serializer_class = TopicSerializer
+    
+    def get_queryset(self):
+        queryset = Topic.objects.all()
+        unit_id = self.request.query_params.get('unit', None)
+        subject_id = self.request.query_params.get('subject', None)
+        if unit_id:
+            queryset = queryset.filter(unit_id=unit_id)
+        if subject_id:
+            queryset = queryset.filter(unit__subject_id=subject_id)
+        return queryset
+    
+    @action(detail=True, methods=['post'])
+    def generate_content(self, request, pk=None):
+        """Generate all content (notes, mindmap, flashcards, MCQs) for a topic"""
+        # Check usage limit
+        allowed, api_key, error_response = check_ai_usage(request.user)
+        if not allowed:
+            return error_response
+
+        topic = self.get_object()
+        subject_name = topic.unit.subject.name
+        
+        # Generate all content
+        content = gemini_service.generate_all_content(topic.name, subject_name, api_key=api_key)
+
+        # Check for errors in content (e.g., AI rate limits or parsing failures)
+        errors = []
+        if 'notes' in content and isinstance(content['notes'], dict) and 'error' in content['notes']:
+            errors.append(('notes', content['notes']['error']))
+        if 'mindmap' in content and isinstance(content['mindmap'], dict) and 'error' in content['mindmap']:
+            errors.append(('mindmap', content['mindmap']['error']))
+        if 'flashcards' in content and isinstance(content['flashcards'], dict) and 'error' in content['flashcards']:
+            errors.append(('flashcards', content['flashcards']['error']))
+        if 'mcqs' in content and isinstance(content['mcqs'], dict) and 'error' in content['mcqs']:
+            errors.append(('mcqs', content['mcqs']['error']))
+        # If we find rate-limit errors, return 429 immediately
+        for part, err in errors:
+            if is_rate_limit_error(err):
+                return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        if errors:
+            # Return an internal server error with details about what failed
+            logger.error('AI generation failed for parts: %s', errors)
+            return Response({'error': 'AI generation failed', 'details': errors}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Increment usage if successful
+        increment_ai_usage(request.user)
+
+        # Save notes
+        if 'notes' in content and 'error' not in content['notes']:
+            Note.objects.update_or_create(
+                topic=topic,
+                defaults={
+                    'summary': content['notes'].get('summary', ''),
+                    'detailed_content': content['notes'].get('detailed_content', ''),
+                    'analogies': content['notes'].get('analogies', []),
+                    'diagram_description': content['notes'].get('diagram_description', '')
+                }
+            )
+        
+        # Save mindmap
+        if 'mindmap' in content and 'error' not in content['mindmap']:
+            Mindmap.objects.update_or_create(
+                topic=topic,
+                defaults={'json_data': content['mindmap']}
+            )
+        
+        # Save flashcards
+        if 'flashcards' in content and content['flashcards']:
+            for fc in content['flashcards']:
+                Flashcard.objects.create(
+                    topic=topic,
+                    front_text=fc.get('front', ''),
+                    back_text=fc.get('back', '')
+                )
+        
+        # Save MCQs
+        if 'mcqs' in content and content['mcqs']:
+            for mcq in content['mcqs']:
+                options = mcq.get('options', {})
+                MCQQuestion.objects.create(
+                    topic=topic,
+                    question_text=mcq.get('question', ''),
+                    option_a=options.get('a', ''),
+                    option_b=options.get('b', ''),
+                    option_c=options.get('c', ''),
+                    option_d=options.get('d', ''),
+                    correct_option=mcq.get('correct', 'a'),
+                    explanation=mcq.get('explanation', ''),
+                    difficulty=mcq.get('difficulty', 'medium')
+                )
+        
+        return Response({
+            'status': 'success',
+            'message': f'Content generated for {topic.name}',
+            'content_summary': {
+                'notes': 'notes' in content,
+                'mindmap': 'mindmap' in content,
+                'flashcards': len(content.get('flashcards', [])),
+                'mcqs': len(content.get('mcqs', []))
+            }
+        })
+
+
+class NoteViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Note.objects.all()
+    serializer_class = NoteSerializer
+    
+    @action(detail=False, methods=['get'])
+    def by_topic(self, request):
+        topic_id = request.query_params.get('topic_id')
+        refresh = request.query_params.get('refresh') == 'true'
+        if not topic_id:
+            return Response({'error': 'topic_id is required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        
+        # Check if notes exist, if not generate them
+        try:
+            note = topic.note
+            if refresh:
+                note.delete()
+                raise Note.DoesNotExist
+        except Note.DoesNotExist:
+            # Check usage limit
+            allowed, api_key, error_response = check_ai_usage(request.user)
+            if not allowed:
+                return error_response
+
+            # Generate notes
+            subject_name = topic.unit.subject.name
+            notes_data = gemini_service.generate_notes(topic.name, subject_name, api_key=api_key)
+
+            if 'error' in notes_data:
+                err = notes_data['error']
+                if is_rate_limit_error(err):
+                    logger.warning('AI quota exceeded generating notes: %s', err)
+                    return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+                return Response({'error': notes_data['error']}, status=500)
+            
+            # Increment usage
+            increment_ai_usage(request.user)
+
+            note = Note.objects.create(
+                topic=topic,
+                summary=notes_data.get('summary', ''),
+                detailed_content=notes_data.get('detailed_content', ''),
+                analogies=notes_data.get('analogies', []),
+                diagram_description=notes_data.get('diagram_description', '')
+            )
+        
+        serializer = NoteSerializer(note)
+        return Response(serializer.data)
+
+
+class MindmapViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Mindmap.objects.all()
+    serializer_class = MindmapSerializer
+    
+    @action(detail=False, methods=['get'])
+    def by_topic(self, request):
+        topic_id = request.query_params.get('topic_id')
+        refresh = request.query_params.get('refresh') == 'true'
+        if not topic_id:
+            return Response({'error': 'topic_id is required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        
+        # Check if mindmap exists, if not generate it
+        try:
+            mindmap = topic.mindmap
+            if refresh:
+                mindmap.delete()
+                raise Mindmap.DoesNotExist
+        except Mindmap.DoesNotExist:
+            # Check usage limit
+            allowed, api_key, error_response = check_ai_usage(request.user)
+            if not allowed:
+                return error_response
+
+            # Generate mindmap
+            subject_name = topic.unit.subject.name
+            mindmap_data = gemini_service.generate_mindmap(topic.name, subject_name, api_key=api_key)
+
+            if 'error' in mindmap_data:
+                err = mindmap_data['error']
+                if is_rate_limit_error(err):
+                    logger.warning('AI quota exceeded generating mindmap: %s', err)
+                    return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+                return Response({'error': mindmap_data['error']}, status=500)
+            
+            # Increment usage
+            increment_ai_usage(request.user)
+
+            mindmap = Mindmap.objects.create(
+                topic=topic,
+                json_data=mindmap_data
+            )
+        
+        serializer = MindmapSerializer(mindmap)
+        return Response(serializer.data)
+
+
+class FlashcardViewSet(viewsets.ModelViewSet):
+    queryset = Flashcard.objects.all()
+    serializer_class = FlashcardSerializer
+    
+    def get_queryset(self):
+        queryset = Flashcard.objects.all()
+        topic_id = self.request.query_params.get('topic_id')
+        if topic_id:
+            queryset = queryset.filter(topic_id=topic_id)
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def by_topic(self, request):
+        topic_id = request.query_params.get('topic_id')
+        refresh = request.query_params.get('refresh') == 'true'
+        if not topic_id:
+            return Response({'error': 'topic_id is required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        flashcards = topic.flashcards.all()
+        
+        # If no flashcards exist or refresh requested, generate them
+        if not flashcards.exists() or refresh:
+            if refresh:
+                flashcards.delete()
+            
+            # Check usage limit
+            allowed, api_key, error_response = check_ai_usage(request.user)
+            if not allowed:
+                return error_response
+
+            # Get notes content if available
+            notes_content = ""
+            try:
+                notes_content = topic.note.detailed_content or topic.note.summary
+            except Note.DoesNotExist:
+                pass
+            
+            flashcards_data = gemini_service.generate_flashcards(topic.name, notes_content, api_key=api_key)
+
+            if isinstance(flashcards_data, dict) and 'error' in flashcards_data:
+                err = flashcards_data['error']
+                if is_rate_limit_error(err):
+                    logger.warning('AI quota exceeded generating flashcards: %s', err)
+                    return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+                return Response({'error': err}, status=500)
+
+            # Increment usage
+            increment_ai_usage(request.user)
+
+            for fc in flashcards_data:
+                Flashcard.objects.create(
+                    topic=topic,
+                    front_text=fc.get('front', ''),
+                    back_text=fc.get('back', '')
+                )
+            
+            flashcards = topic.flashcards.all()
+        
+        serializer = FlashcardSerializer(flashcards, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def review(self, request, pk=None):
+        """Record a flashcard review for spaced repetition"""
+        flashcard = self.get_object()
+        quality = request.data.get('quality', 0)  # 0-5
+        
+        review, created = FlashcardReview.objects.get_or_create(
+            user=request.user,
+            flashcard=flashcard
+        )
+        review.update_next_due(quality)
+        
+        return Response({
+            'status': 'success',
+            'next_due_at': review.next_due_at
+        })
+
+
+class MCQViewSet(viewsets.ModelViewSet):
+    queryset = MCQQuestion.objects.all()
+    serializer_class = MCQQuestionSerializer
+    
+    def get_queryset(self):
+        queryset = MCQQuestion.objects.all()
+        topic_id = self.request.query_params.get('topic_id')
+        if topic_id:
+            queryset = queryset.filter(topic_id=topic_id)
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def by_topic(self, request):
+        topic_id = request.query_params.get('topic_id')
+        refresh = request.query_params.get('refresh') == 'true'
+        if not topic_id:
+            return Response({'error': 'topic_id is required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        mcqs = topic.mcqs.all()
+        
+        # If no MCQs exist or refresh requested, generate them
+        if not mcqs.exists() or refresh:
+            if refresh:
+                mcqs.delete()
+            
+            # Check usage limit
+            allowed, api_key, error_response = check_ai_usage(request.user)
+            if not allowed:
+                return error_response
+
+            notes_content = ""
+            try:
+                notes_content = topic.note.detailed_content or topic.note.summary
+            except Note.DoesNotExist:
+                pass
+            
+            mcqs_data = gemini_service.generate_mcqs(topic.name, notes_content, api_key=api_key)
+
+            if isinstance(mcqs_data, dict) and 'error' in mcqs_data:
+                err = mcqs_data['error']
+                if is_rate_limit_error(err):
+                    logger.warning('AI quota exceeded generating mcqs: %s', err)
+                    return Response({'error': 'AI quota exceeded: ' + str(err)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+                return Response({'error': err}, status=500)
+
+            # Increment usage
+            increment_ai_usage(request.user)
+
+            for mcq in mcqs_data:
+                options = mcq.get('options', {})
+                MCQQuestion.objects.create(
+                    topic=topic,
+                    question_text=mcq.get('question', ''),
+                    option_a=options.get('a', ''),
+                    option_b=options.get('b', ''),
+                    option_c=options.get('c', ''),
+                    option_d=options.get('d', ''),
+                    correct_option=mcq.get('correct', 'a'),
+                    explanation=mcq.get('explanation', ''),
+                    difficulty=mcq.get('difficulty', 'medium')
+                )
+            
+            mcqs = topic.mcqs.all()
+        
+        # Return without answers for quiz mode
+        hide_answers = request.query_params.get('quiz_mode', 'false').lower() == 'true'
+        if hide_answers:
+            serializer = MCQQuestionListSerializer(mcqs, many=True)
+        else:
+            serializer = MCQQuestionSerializer(mcqs, many=True)
+        
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def submit_answer(self, request, pk=None):
+        """Submit an answer for an MCQ"""
+        mcq = self.get_object()
+        selected_option = request.data.get('selected_option', '').lower()
+        
+        if selected_option not in ['a', 'b', 'c', 'd']:
+            return Response({'error': 'Invalid option'}, status=400)
+        
+        is_correct = selected_option == mcq.correct_option
+        
+        MCQAttempt.objects.create(
+            user=request.user,
+            mcq=mcq,
+            selected_option=selected_option,
+            is_correct=is_correct
+        )
+        
+        # Update progress
+        progress, _ = UserProgress.objects.get_or_create(user=request.user, topic=mcq.topic)
+        progress.mcqs_attempted += 1
+        if is_correct:
+            progress.mcqs_correct += 1
+        progress.last_studied_at = timezone.now()
+        progress.save()
+        
+        return Response({
+            'is_correct': is_correct,
+            'correct_option': mcq.correct_option,
+            'explanation': mcq.explanation
+        })
+
+
+class PYQViewSet(viewsets.ModelViewSet):
+    queryset = PYQQuestion.objects.all()
+    serializer_class = PYQQuestionSerializer
+    
+    def get_queryset(self):
+        queryset = PYQQuestion.objects.all()
+        subject_id = self.request.query_params.get('subject_id')
+        topic_id = self.request.query_params.get('topic_id')
+        year = self.request.query_params.get('year')
+        
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+        if topic_id:
+            queryset = queryset.filter(topic_id=topic_id)
+        if year:
+            queryset = queryset.filter(year=year)
+        
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def analysis(self, request):
+        """Get PYQ analysis for a subject"""
+        subject_id = request.query_params.get('subject_id')
+        if not subject_id:
+            return Response({'error': 'subject_id is required'}, status=400)
+        
+        # Topic-wise analysis
+        topic_stats = PYQQuestion.objects.filter(
+            subject_id=subject_id,
+            topic__isnull=False
+        ).values('topic__id', 'topic__name').annotate(
+            total_questions=Count('id'),
+            total_marks=Sum('marks'),
+            years_appeared=Count('year', distinct=True)
+        ).order_by('-total_marks')
+        
+        # Year-wise distribution
+        year_stats = PYQQuestion.objects.filter(
+            subject_id=subject_id
+        ).values('year').annotate(
+            question_count=Count('id'),
+            total_marks=Sum('marks')
+        ).order_by('-year')
+        
+        return Response({
+            'topic_analysis': list(topic_stats),
+            'year_distribution': list(year_stats)
+        })
+    
+    @action(detail=False, methods=['post'])
+    def tag_questions(self, request):
+        """Auto-tag untagged PYQs to topics using AI"""
+        subject_id = request.data.get('subject_id')
+        if not subject_id:
+            return Response({'error': 'subject_id is required'}, status=400)
+        
+        subject = get_object_or_404(Subject, pk=subject_id)
+        untagged_pyqs = PYQQuestion.objects.filter(subject=subject, is_tagged=False)
+        
+        # Get all topics for this subject
+        topics = Topic.objects.filter(unit__subject=subject)
+        topic_names = [t.name for t in topics]
+        topic_map = {t.name.lower(): t for t in topics}
+        
+        tagged_count = 0
+        for pyq in untagged_pyqs:
+            topic_name = gemini_service.tag_pyq_to_topic(pyq.question_text, topic_names)
+            if topic_name:
+                topic_name_lower = topic_name.lower().strip()
+                if topic_name_lower in topic_map:
+                    pyq.topic = topic_map[topic_name_lower]
+                    pyq.is_tagged = True
+                    pyq.save()
+                    tagged_count += 1
+        
+        return Response({
+            'status': 'success',
+            'tagged_count': tagged_count,
+            'total_untagged': untagged_pyqs.count()
+        })
+
+
+class UserProgressViewSet(viewsets.ModelViewSet):
+    queryset = UserProgress.objects.all()
+    serializer_class = UserProgressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = UserProgress.objects.filter(user=self.request.user)
+        subject_id = self.request.query_params.get('subject_id')
+        
+        if subject_id:
+            queryset = queryset.filter(topic__unit__subject_id=subject_id)
+        
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def dashboard(self, request):
+        """Get overall progress dashboard"""
+        subject_id = request.query_params.get('subject_id')
+        
+        progress_qs = UserProgress.objects.filter(user=request.user)
+        if subject_id:
+            progress_qs = progress_qs.filter(topic__unit__subject_id=subject_id)
+            total_topics = Topic.objects.filter(unit__subject_id=subject_id).count()
+        else:
+            total_topics = Topic.objects.count()
+        
+        # Calculate stats
+        progress_list = list(progress_qs)
+        completed_topics = sum(1 for p in progress_list if p.is_completed)
+        
+        # Calculate average completion percentage across all topics
+        total_completion_sum = sum(p.completion_percentage for p in progress_list)
+        avg_completion = (total_completion_sum / total_topics) if total_topics > 0 else 0
+        
+        total_mcqs_attempted = sum(p.mcqs_attempted for p in progress_list)
+        total_mcqs_correct = sum(p.mcqs_correct for p in progress_list)
+        overall_accuracy = (total_mcqs_correct / total_mcqs_attempted * 100) if total_mcqs_attempted > 0 else 0
+        
+        weak_topics = [p.topic.name for p in progress_list if p.strength_level == 'weak' and p.mcqs_attempted >= 5]
+        strong_topics = [p.topic.name for p in progress_list if p.strength_level == 'strong']
+        
+        return Response({
+            'total_topics': total_topics,
+            'completed_topics': completed_topics,
+            'completion_percentage': avg_completion,
+            'overall_mcq_accuracy': overall_accuracy,
+            'weak_topics': weak_topics,
+            'strong_topics': strong_topics
+        })
+    
+    @action(detail=False, methods=['post'])
+    def update_activity(self, request):
+        """Update user's activity on a topic"""
+        topic_id = request.data.get('topic_id')
+        activity_type = request.data.get('activity_type')  # mindmap, notes, flashcard, time
+        duration = request.data.get('duration', 0) # in seconds
+        
+        if not topic_id:
+            return Response({'error': 'topic_id required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        progress, _ = UserProgress.objects.get_or_create(user=request.user, topic=topic)
+        
+        if activity_type == 'mindmap':
+            progress.mindmap_viewed = True
+        elif activity_type == 'notes':
+            progress.notes_read = True
+        elif activity_type == 'flashcard':
+            progress.flashcards_completed += 1
+        elif activity_type == 'time':
+            progress.total_study_time += int(duration)
+        
+        progress.last_studied_at = timezone.now()
+        progress.save()
+        
+        return Response(UserProgressSerializer(progress).data)
+    
+    @action(detail=False, methods=['post'])
+    def mark_complete(self, request):
+        """Mark a topic as completed (user confirmed)"""
+        topic_id = request.data.get('topic_id')
+        confirm = request.data.get('confirm', False)
+        
+        if not topic_id:
+            return Response({'error': 'topic_id required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        progress, _ = UserProgress.objects.get_or_create(user=request.user, topic=topic)
+        
+        # Check criteria
+        warnings = []
+        if progress.total_study_time < 1500: # 25 minutes
+            warnings.append(f"You have only spent {progress.total_study_time // 60} minutes on this topic. Recommended time is 25 minutes.")
+        
+        if progress.mcq_accuracy < 60 and progress.mcqs_attempted > 0:
+             warnings.append(f"Your MCQ accuracy is {progress.mcq_accuracy:.1f}%. Recommended is 60%.")
+        
+        if warnings and not confirm:
+            return Response({
+                'status': 'warning',
+                'warnings': warnings,
+                'message': 'Are you sure you want to mark this as complete?'
+            })
+
+        progress.mark_complete()
+        
+        return Response({
+            'status': 'success',
+            'message': f'Topic "{topic.name}" marked as complete',
+            'progress': UserProgressSerializer(progress).data
+        })
+    
+    @action(detail=False, methods=['get'])
+    def by_topic(self, request):
+        """Get progress for a specific topic"""
+        topic_id = request.query_params.get('topic_id')
+        
+        if not topic_id:
+            return Response({'error': 'topic_id required'}, status=400)
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        progress, _ = UserProgress.objects.get_or_create(user=request.user, topic=topic)
+        
+        return Response(UserProgressSerializer(progress).data)
+
+
+class ChatView(APIView):
+    """Doubt chatbot endpoint"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        # Check usage limit
+        allowed, api_key, error_response = check_ai_usage(request.user)
+        if not allowed:
+            return error_response
+
+        serializer = ChatRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        
+        topic_id = serializer.validated_data['topic_id']
+        user_message = serializer.validated_data['message']
+        
+        topic = get_object_or_404(Topic, pk=topic_id)
+        
+        # Get notes content for context
+        notes_content = ""
+        try:
+            notes_content = topic.note.detailed_content or topic.note.summary
+        except Note.DoesNotExist:
+            # Generate notes first
+            subject_name = topic.unit.subject.name
+            notes_data = gemini_service.generate_notes(topic.name, subject_name, api_key=api_key)
+            if 'error' not in notes_data:
+                Note.objects.create(
+                    topic=topic,
+                    summary=notes_data.get('summary', ''),
+                    detailed_content=notes_data.get('detailed_content', ''),
+                    analogies=notes_data.get('analogies', []),
+                    diagram_description=notes_data.get('diagram_description', '')
+                )
+                notes_content = notes_data.get('detailed_content', notes_data.get('summary', ''))
+        
+        # Get AI response
+        ai_response = gemini_service.answer_doubt(user_message, topic.name, notes_content, api_key=api_key)
+        
+        # Increment usage
+        increment_ai_usage(request.user)
+        
+        # Save chat message
+        chat_message = ChatMessage.objects.create(
+            user=request.user,
+            topic=topic,
+            user_message=user_message,
+            ai_response=ai_response
+        )
+        
+        return Response(ChatMessageSerializer(chat_message).data)
+
+
+class StudySessionViewSet(viewsets.ModelViewSet):
+    """Track study sessions for timer functionality"""
+    queryset = StudySession.objects.all()
+    serializer_class = StudySessionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return StudySession.objects.filter(user=self.request.user).order_by('-started_at')
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def active(self, request):
+        """Get currently active (non-ended) session"""
+        session = StudySession.objects.filter(user=request.user, ended_at__isnull=True).first()
+        if session:
+            return Response(StudySessionSerializer(session).data)
+        return Response({'active': None})
+
+    @action(detail=True, methods=['post'])
+    def end(self, request, pk=None):
+        """End a study session and compute duration"""
+        session = self.get_object()
+        if session.ended_at:
+            return Response({'error': 'Session already ended'}, status=400)
+        session.end()
+        
+        # Update user progress for the topic
+        progress, _ = UserProgress.objects.get_or_create(user=request.user, topic=session.topic)
+        progress.last_studied_at = timezone.now()
+        progress.total_study_time += session.duration_seconds
+        progress.save()
+        
+        return Response(StudySessionSerializer(session).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """Get total study time stats"""
+        sessions = StudySession.objects.filter(user=request.user, ended_at__isnull=False)
+        total_seconds = sessions.aggregate(total=Sum('duration_seconds'))['total'] or 0
+        
+        topic_id = request.query_params.get('topic_id')
+        if topic_id:
+            topic_sessions = sessions.filter(topic_id=topic_id)
+            topic_seconds = topic_sessions.aggregate(total=Sum('duration_seconds'))['total'] or 0
+        else:
+            topic_seconds = 0
+        
+        return Response({
+            'total_study_time_seconds': total_seconds,
+            'total_study_time_minutes': total_seconds // 60,
+            'topic_study_time_seconds': topic_seconds,
+            'topic_study_time_minutes': topic_seconds // 60
+        })
+
+
+class StudyPlanViewSet(viewsets.ModelViewSet):
+    queryset = StudyPlan.objects.all()
+    serializer_class = StudyPlanSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @action(detail=False, methods=['post'])
+    def generate(self, request):
+        """Generate a study plan"""
+        subject_id = request.data.get('subject_id')
+        exam_date = request.data.get('exam_date')
+        hours_per_day = request.data.get('hours_per_day', 2.0)
+        
+        if not subject_id or not exam_date:
+            return Response({'error': 'subject_id and exam_date required'}, status=400)
+        
+        from datetime import datetime
+        
+        subject = get_object_or_404(Subject, pk=subject_id)
+        
+        # Parse exam date
+        exam_date = datetime.strptime(exam_date, '%Y-%m-%d').date()
+        today = timezone.now().date()
+        days_available = (exam_date - today).days
+        
+        if days_available <= 0:
+            return Response({'error': 'Exam date must be in the future'}, status=400)
+        
+        # Create study plan
+        plan = StudyPlan.objects.create(
+            user=request.user,
+            subject=subject,
+            exam_date=exam_date,
+            hours_per_day=hours_per_day
+        )
+        
+        # Get all topics
+        topics = list(Topic.objects.filter(unit__subject=subject).order_by('unit__unit_number', 'order'))
+        
+        # Distribute topics across days
+        topics_per_day = max(1, len(topics) // days_available)
+        
+        current_date = today
+        for i, topic in enumerate(topics):
+            if i > 0 and i % topics_per_day == 0:
+                current_date += timedelta(days=1)
+            
+            if current_date >= exam_date:
+                current_date = exam_date - timedelta(days=1)
+            
+            StudyPlanItem.objects.create(
+                plan=plan,
+                topic=topic,
+                scheduled_date=current_date
+            )
+        
+        return Response(StudyPlanSerializer(plan).data)
