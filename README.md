@@ -40,6 +40,24 @@ $env:DATABASE_URL = "postgres://..."
 
 Django will automatically use this if found; otherwise, it falls back to `db.sqlite3`.
 
+### Deploy to Render
+
+1.  Push this repo to GitHub.
+2.  Create a new **Web Service** on [Render](https://render.com).
+3.  Connect your repository.
+4.  Settings:
+    *   **Runtime**: Python 3
+    *   **Build Command**: `./build.sh`
+    *   **Start Command**: `gunicorn smartstudy.wsgi:application`
+5.  **Environment Variables**:
+    *   `DATABASE_URL`: Your Neon (or Render config) PostgreSQL connection string.
+    *   `GEMINI_API_KEY`: Your Gemini API key.
+    *   `PYTHON_VERSION`: `3.11.9` (optional, to match your env).
+
+Notes for Render:
+- `build.sh` handles dependency installation, static files collection, and migrations automatically.
+- Ensure `ALLOWED_HOSTS` in `settings.py` includes your Render URL (currently set to `*`).
+
 Database & Django commands:
 
 ```powershell
