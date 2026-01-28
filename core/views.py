@@ -15,7 +15,7 @@ from .models import (
     Subject, Unit, Topic, Note, Mindmap, Flashcard, FlashcardReview,
     MCQQuestion, MCQAttempt, PYQQuestion, UserProgress, StudyPlan,
     StudyPlanItem, ChatMessage, StudySession, UserProfile,
-    EmailVerification, PasswordReset
+    EmailVerification, PasswordReset, AITask
 )
 from django.core.mail import send_mail
 from django.conf import settings
@@ -48,6 +48,30 @@ def sanitize_text(text, max_length=10000):
 
 logger = logging.getLogger(__name__)
 
+
+def is_async_enabled():
+    """Check if async task processing is enabled."""
+    return getattr(settings, 'ENABLE_ASYNC_TASKS', False)
+
+
+def run_task_async(func, *args, **kwargs):
+    """
+    Run a task asynchronously if enabled, otherwise run synchronously.
+    Returns (is_async, task_id_or_result)
+    """
+    if is_async_enabled():
+        try:
+            from django_q.tasks import async_task
+            task_id = async_task(func, *args, **kwargs)
+            return True, task_id
+        except ImportError:
+            pass
+    
+    # Run synchronously
+    result = func(*args, **kwargs)
+    return False, result
+
+
 def check_ai_usage(user):
     """
     Check if user can perform AI action.
@@ -59,7 +83,8 @@ def check_ai_usage(user):
         # Should exist due to signal, but just in case
         profile = UserProfile.objects.create(user=user)
     
-    api_key = profile.gemini_api_key
+    # Use encrypted API key getter
+    api_key = profile.get_api_key()
     
     # If user has their own key, no limits
     if api_key:
@@ -84,7 +109,7 @@ def increment_ai_usage(user):
     """Increment usage count if using system key"""
     try:
         profile = user.profile
-        if not profile.gemini_api_key:
+        if not profile.get_api_key():
             profile.daily_ai_usage_count += 1
             profile.save()
     except:
@@ -450,9 +475,13 @@ The Padho Abhi Team
         data = UserSerializer(request.user).data
         try:
             profile = request.user.profile
-            data['has_api_key'] = bool(profile.gemini_api_key)
+            data['has_api_key'] = profile.has_api_key()
             data['daily_usage'] = profile.daily_ai_usage_count
-            data['api_key'] = profile.gemini_api_key  # In real app, don't return this or mask it
+            # Never return the actual API key - only masked version if exists
+            api_key = profile.get_api_key()
+            if api_key:
+                # Mask API key: show first 4 and last 4 characters
+                data['api_key_masked'] = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "****"
             data['total_input_tokens'] = profile.total_input_tokens
             data['total_output_tokens'] = profile.total_output_tokens
             data['estimated_cost'] = float(profile.estimated_cost)
@@ -466,19 +495,20 @@ The Padho Abhi Team
 
     @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def update_api_key(self, request):
-        """Update user's Gemini API key"""
+        """Update user's Gemini API key (encrypted)"""
         api_key = request.data.get('api_key', '').strip()
         try:
             profile = request.user.profile
         except:
             profile = UserProfile.objects.create(user=request.user)
         
-        profile.gemini_api_key = api_key if api_key else None
+        # Use encrypted setter
+        profile.set_api_key(api_key if api_key else None)
         profile.save()
         
         return Response({
             'status': 'success',
-            'has_api_key': bool(profile.gemini_api_key)
+            'has_api_key': profile.has_api_key()
         })
 
 
@@ -625,7 +655,36 @@ class TopicViewSet(viewsets.ModelViewSet):
         topic = self.get_object()
         subject_name = topic.unit.subject.name
         
-        # Generate all content
+        # Check if async mode requested
+        use_async = request.data.get('async', False) and is_async_enabled()
+        
+        if use_async:
+            # Create pending task record
+            task, _ = AITask.objects.update_or_create(
+                topic=topic,
+                user=request.user,
+                task_type='generate_all',
+                defaults={'status': 'pending'}
+            )
+            
+            # Run in background
+            from .tasks import generate_content_task
+            is_async, task_id = run_task_async(
+                generate_content_task,
+                topic.id,
+                request.user.id,
+                api_key
+            )
+            
+            if is_async:
+                return Response({
+                    'status': 'processing',
+                    'message': 'Content generation started in background',
+                    'task_id': str(task.id),
+                    'poll_url': f'/api/topics/{topic.id}/task_status/'
+                }, status=status.HTTP_202_ACCEPTED)
+        
+        # Synchronous generation (original behavior)
         content = gemini_service.generate_all_content(topic.name, subject_name, api_key=api_key)
 
         # Check for errors in content (e.g., AI rate limits or parsing failures)
@@ -705,6 +764,33 @@ class TopicViewSet(viewsets.ModelViewSet):
                 'mcqs': len(content.get('mcqs', []))
             }
         })
+
+    @action(detail=True, methods=['get'])
+    def task_status(self, request, pk=None):
+        """Check the status of a background AI task"""
+        topic = self.get_object()
+        task_type = request.query_params.get('type', 'generate_all')
+        
+        try:
+            task = AITask.objects.filter(
+                topic=topic,
+                user=request.user,
+                task_type=task_type
+            ).latest('created_at')
+            
+            return Response({
+                'status': task.status,
+                'created_at': task.created_at,
+                'started_at': task.started_at,
+                'completed_at': task.completed_at,
+                'error_message': task.error_message,
+                'result': task.result
+            })
+        except AITask.DoesNotExist:
+            return Response({
+                'status': 'not_found',
+                'message': 'No task found for this topic'
+            }, status=status.HTTP_404_NOT_FOUND)
 
 
 class NoteViewSet(viewsets.ReadOnlyModelViewSet):

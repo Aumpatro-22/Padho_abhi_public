@@ -11,13 +11,52 @@ import uuid
 class UserProfile(models.Model):
     """Extended user profile to store API keys and usage stats"""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
-    gemini_api_key = models.CharField(max_length=255, blank=True, null=True, help_text="User's personal Gemini API Key")
+    # Encrypted API key storage - stores Fernet-encrypted value
+    _encrypted_api_key = models.TextField(blank=True, null=True, db_column='gemini_api_key_encrypted')
+    # Legacy field for migration - will be removed after migration
+    gemini_api_key = models.CharField(max_length=255, blank=True, null=True, help_text="Deprecated - use encrypted key")
     daily_ai_usage_count = models.IntegerField(default=0)
     last_usage_date = models.DateField(default=timezone.now)
     
     # Token usage tracking
     total_input_tokens = models.BigIntegerField(default=0)
     total_output_tokens = models.BigIntegerField(default=0)
+    
+    def get_api_key(self):
+        """Get decrypted API key."""
+        from .encryption import decrypt_value, is_encrypted
+        
+        # First try encrypted key
+        if self._encrypted_api_key:
+            decrypted = decrypt_value(self._encrypted_api_key)
+            if decrypted:
+                return decrypted
+        
+        # Fallback to legacy plaintext key (for migration)
+        if self.gemini_api_key:
+            # Migrate: encrypt and store
+            self.set_api_key(self.gemini_api_key)
+            # Clear plaintext
+            self.gemini_api_key = None
+            self.save(update_fields=['_encrypted_api_key', 'gemini_api_key'])
+            return self.get_api_key()
+        
+        return None
+    
+    def set_api_key(self, api_key: str):
+        """Set and encrypt API key."""
+        from .encryption import encrypt_value
+        
+        if api_key:
+            self._encrypted_api_key = encrypt_value(api_key)
+        else:
+            self._encrypted_api_key = None
+        # Clear legacy field
+        self.gemini_api_key = None
+    
+    def has_api_key(self):
+        """Check if user has an API key set."""
+        return bool(self._encrypted_api_key or self.gemini_api_key)
     
     @property
     def total_tokens(self):
@@ -34,6 +73,45 @@ class UserProfile(models.Model):
     def __str__(self):
         return f"Profile: {self.user.username}"
 
+
+class AITask(models.Model):
+    """Track background AI generation tasks"""
+    TASK_TYPES = [
+        ('generate_all', 'Generate All Content'),
+        ('generate_notes', 'Generate Notes'),
+        ('generate_mindmap', 'Generate Mindmap'),
+        ('generate_flashcards', 'Generate Flashcards'),
+        ('generate_mcqs', 'Generate MCQs'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_tasks')
+    topic = models.ForeignKey('Topic', on_delete=models.CASCADE, related_name='ai_tasks')
+    task_type = models.CharField(max_length=50, choices=TASK_TYPES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, null=True)
+    result = models.JSONField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'topic', 'task_type']),
+            models.Index(fields=['status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.task_type} for {self.topic.name} ({self.status})"
+
+
 @receiver(post_save, sender=User)
 def create_user_profile(sender, instance, created, **kwargs):
     if created:
@@ -42,6 +120,7 @@ def create_user_profile(sender, instance, created, **kwargs):
 @receiver(post_save, sender=User)
 def save_user_profile(sender, instance, **kwargs):
     instance.profile.save()
+
 
 
 class EmailVerification(models.Model):
