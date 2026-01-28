@@ -157,15 +157,14 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Serve React static assets (JS, CSS) via WhiteNoise
-STATICFILES_DIRS = []
-if REACT_APP_DIR.exists():
-    STATICFILES_DIRS.append(REACT_APP_DIR)
+# Always include the React build directory (will be created during build)
+STATICFILES_DIRS = [REACT_APP_DIR]
 
 # Use simpler storage for compatibility
 STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
-# WhiteNoise config for serving React assets
-WHITENOISE_ROOT = REACT_APP_DIR if REACT_APP_DIR.exists() else None
+# WhiteNoise config for serving React assets from root
+WHITENOISE_ROOT = REACT_APP_DIR
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
