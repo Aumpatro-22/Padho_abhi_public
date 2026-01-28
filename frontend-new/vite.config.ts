@@ -6,6 +6,10 @@ import path from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  base: '/static/', // Serve assets from Django's static URL
+  build: {
+    assetsDir: 'assets',
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
