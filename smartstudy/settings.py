@@ -199,3 +199,15 @@ NEON_AUTH_JWKS_CACHE_TTL = int(os.environ.get('NEON_AUTH_JWKS_CACHE_TTL', '300')
 # Gemini API Key - Prefer environment variable for security
 # Local dev fallback (not recommended in production; set in .env or environment variables instead)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', "AIzaSyDBpFWNQgH_6oMzjBAF9m0JUIQBf7D1e68")
+
+# Email Configuration for verification
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')  # Use App Password for Gmail
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Padho Abhi <noreply@padhoabhi.com>')
+
+# Frontend URL for email links
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://padho-abhi.onrender.com')

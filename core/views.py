@@ -14,8 +14,12 @@ import html
 from .models import (
     Subject, Unit, Topic, Note, Mindmap, Flashcard, FlashcardReview,
     MCQQuestion, MCQAttempt, PYQQuestion, UserProgress, StudyPlan,
-    StudyPlanItem, ChatMessage, StudySession, UserProfile
+    StudyPlanItem, ChatMessage, StudySession, UserProfile,
+    EmailVerification, PasswordReset
 )
+from django.core.mail import send_mail
+from django.conf import settings
+from django.contrib.auth.models import User
 from .serializers import (
     SubjectSerializer, SubjectListSerializer, UnitSerializer, TopicSerializer,
     NoteSerializer, MindmapSerializer, FlashcardSerializer, FlashcardReviewSerializer,
@@ -131,17 +135,292 @@ def is_rate_limit_error(error_msg):
 class AuthViewSet(viewsets.ViewSet):
     permission_classes = [permissions.AllowAny]
 
+    def _send_verification_email(self, user, verification):
+        """Send verification email to user"""
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://padho-abhi.onrender.com')
+        verify_url = f"{frontend_url}/verify-email?token={verification.token}"
+        
+        subject = "Verify your Padho Abhi account"
+        message = f"""
+Hello {user.username},
+
+Welcome to Padho Abhi! 🎓
+
+Please verify your email address by clicking the link below:
+
+{verify_url}
+
+This link will expire in 24 hours.
+
+If you didn't create an account, you can safely ignore this email.
+
+Best regards,
+The Padho Abhi Team
+        """
+        
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }}
+        .container {{ max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #6366f1, #3b82f6); padding: 40px 20px; text-align: center; }}
+        .header h1 {{ color: white; margin: 0; font-size: 28px; }}
+        .header p {{ color: rgba(255,255,255,0.9); margin: 10px 0 0; }}
+        .content {{ padding: 40px 30px; }}
+        .content h2 {{ color: #1f2937; margin-top: 0; }}
+        .content p {{ color: #4b5563; line-height: 1.6; }}
+        .btn {{ display: inline-block; background: linear-gradient(135deg, #6366f1, #3b82f6); color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; margin: 20px 0; }}
+        .btn:hover {{ opacity: 0.9; }}
+        .footer {{ background: #f9fafb; padding: 20px; text-align: center; color: #6b7280; font-size: 14px; }}
+        .expire {{ background: #fef3c7; padding: 12px 20px; border-radius: 8px; color: #92400e; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎓 Padho Abhi</h1>
+            <p>AI-Powered Learning Platform</p>
+        </div>
+        <div class="content">
+            <h2>Welcome, {user.username}! 👋</h2>
+            <p>Thank you for signing up for Padho Abhi. To complete your registration and start your learning journey, please verify your email address.</p>
+            <center><a href="{verify_url}" class="btn">Verify Email Address</a></center>
+            <div class="expire">⏰ This link will expire in 24 hours</div>
+            <p>If the button doesn't work, copy and paste this link into your browser:</p>
+            <p style="word-break: break-all; color: #6366f1;">{verify_url}</p>
+        </div>
+        <div class="footer">
+            <p>If you didn't create this account, you can safely ignore this email.</p>
+            <p>© 2026 Padho Abhi. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+        """
+        
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                html_message=html_message,
+                fail_silently=False,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send verification email to {user.email}: {e}")
+            return False
+
     @action(detail=False, methods=['post'])
     def register(self, request):
         serializer = RegisterSerializer(data=request.data)
         if serializer.is_valid():
+            # Check if email already exists
+            email = serializer.validated_data['email']
+            if User.objects.filter(email=email).exists():
+                return Response({
+                    'error': 'An account with this email already exists.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
             user = serializer.save()
-            token, _ = Token.objects.get_or_create(user=user)
-            return Response({
-                'token': token.key,
-                'user': UserSerializer(user).data
-            }, status=status.HTTP_201_CREATED)
+            user.is_active = False  # Deactivate until email is verified
+            user.save()
+            
+            # Create verification token
+            verification = EmailVerification.objects.create(user=user)
+            
+            # Send verification email
+            email_sent = self._send_verification_email(user, verification)
+            
+            if email_sent:
+                return Response({
+                    'message': 'Registration successful! Please check your email to verify your account.',
+                    'email': user.email,
+                    'requires_verification': True
+                }, status=status.HTTP_201_CREATED)
+            else:
+                # If email fails, still create account but allow login
+                user.is_active = True
+                user.save()
+                token, _ = Token.objects.get_or_create(user=user)
+                return Response({
+                    'token': token.key,
+                    'user': UserSerializer(user).data,
+                    'message': 'Account created. Email verification could not be sent.'
+                }, status=status.HTTP_201_CREATED)
+                
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'])
+    def verify_email(self, request):
+        """Verify email with token"""
+        token = request.data.get('token')
+        if not token:
+            return Response({'error': 'Verification token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            verification = EmailVerification.objects.get(token=token)
+        except EmailVerification.DoesNotExist:
+            return Response({'error': 'Invalid verification token'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if verification.is_expired:
+            return Response({'error': 'Verification link has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if verification.is_verified:
+            return Response({'message': 'Email already verified. You can login now.'}, status=status.HTTP_200_OK)
+        
+        if verification.verify():
+            auth_token, _ = Token.objects.get_or_create(user=verification.user)
+            return Response({
+                'message': 'Email verified successfully!',
+                'token': auth_token.key,
+                'user': UserSerializer(verification.user).data
+            }, status=status.HTTP_200_OK)
+        
+        return Response({'error': 'Verification failed'}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'])
+    def resend_verification(self, request):
+        """Resend verification email"""
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Email is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({'error': 'No account found with this email'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if user.is_active:
+            return Response({'message': 'Email already verified'}, status=status.HTTP_200_OK)
+        
+        # Invalidate old verifications and create new one
+        EmailVerification.objects.filter(user=user, verified_at__isnull=True).delete()
+        verification = EmailVerification.objects.create(user=user)
+        
+        if self._send_verification_email(user, verification):
+            return Response({'message': 'Verification email sent!'}, status=status.HTTP_200_OK)
+        
+        return Response({'error': 'Failed to send email. Please try again later.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def forgot_password(self, request):
+        """Request password reset"""
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Email is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            # Don't reveal if email exists
+            return Response({'message': 'If an account exists with this email, you will receive a password reset link.'}, status=status.HTTP_200_OK)
+        
+        # Create reset token
+        reset = PasswordReset.objects.create(user=user)
+        
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://padho-abhi.onrender.com')
+        reset_url = f"{frontend_url}/reset-password?token={reset.token}"
+        
+        subject = "Reset your Padho Abhi password"
+        message = f"""
+Hello {user.username},
+
+We received a request to reset your password. Click the link below to set a new password:
+
+{reset_url}
+
+This link will expire in 1 hour.
+
+If you didn't request this, you can safely ignore this email.
+
+Best regards,
+The Padho Abhi Team
+        """
+        
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }}
+        .container {{ max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #6366f1, #3b82f6); padding: 40px 20px; text-align: center; }}
+        .header h1 {{ color: white; margin: 0; font-size: 28px; }}
+        .content {{ padding: 40px 30px; }}
+        .content h2 {{ color: #1f2937; margin-top: 0; }}
+        .content p {{ color: #4b5563; line-height: 1.6; }}
+        .btn {{ display: inline-block; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; margin: 20px 0; }}
+        .footer {{ background: #f9fafb; padding: 20px; text-align: center; color: #6b7280; font-size: 14px; }}
+        .expire {{ background: #fee2e2; padding: 12px 20px; border-radius: 8px; color: #991b1b; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 Password Reset</h1>
+        </div>
+        <div class="content">
+            <h2>Hello, {user.username}</h2>
+            <p>We received a request to reset your password. Click the button below to create a new password:</p>
+            <center><a href="{reset_url}" class="btn">Reset Password</a></center>
+            <div class="expire">⏰ This link will expire in 1 hour</div>
+            <p>If you didn't request this password reset, you can safely ignore this email.</p>
+        </div>
+        <div class="footer">
+            <p>© 2026 Padho Abhi. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+        """
+        
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                html_message=html_message,
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send password reset email to {user.email}: {e}")
+        
+        return Response({'message': 'If an account exists with this email, you will receive a password reset link.'}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'])
+    def reset_password(self, request):
+        """Reset password with token"""
+        token = request.data.get('token')
+        new_password = request.data.get('password')
+        
+        if not token or not new_password:
+            return Response({'error': 'Token and new password are required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if len(new_password) < 8:
+            return Response({'error': 'Password must be at least 8 characters'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            reset = PasswordReset.objects.get(token=token)
+        except PasswordReset.DoesNotExist:
+            return Response({'error': 'Invalid reset token'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if reset.is_expired:
+            return Response({'error': 'Reset link has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if reset.is_used:
+            return Response({'error': 'This reset link has already been used.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Reset the password
+        reset.user.set_password(new_password)
+        reset.user.save()
+        reset.use()
+        
+        return Response({'message': 'Password reset successfully! You can now login with your new password.'}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'])
     def login(self, request):
@@ -152,6 +431,12 @@ class AuthViewSet(viewsets.ViewSet):
                 password=serializer.validated_data['password']
             )
             if user:
+                if not user.is_active:
+                    return Response({
+                        'error': 'Please verify your email before logging in.',
+                        'requires_verification': True,
+                        'email': user.email
+                    }, status=status.HTTP_403_FORBIDDEN)
                 token, _ = Token.objects.get_or_create(user=user)
                 return Response({
                     'token': token.key,

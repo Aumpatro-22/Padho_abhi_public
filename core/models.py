@@ -5,6 +5,7 @@ from django.dispatch import receiver
 from django.utils import timezone
 from datetime import timedelta
 import json
+import uuid
 
 
 class UserProfile(models.Model):
@@ -41,6 +42,74 @@ def create_user_profile(sender, instance, created, **kwargs):
 @receiver(post_save, sender=User)
 def save_user_profile(sender, instance, **kwargs):
     instance.profile.save()
+
+
+class EmailVerification(models.Model):
+    """Email verification tokens for user registration"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_verifications')
+    token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=24)
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+    
+    @property
+    def is_verified(self):
+        return self.verified_at is not None
+    
+    def verify(self):
+        """Mark the email as verified"""
+        if not self.is_expired and not self.is_verified:
+            self.verified_at = timezone.now()
+            self.user.is_active = True
+            self.user.save()
+            self.save()
+            return True
+        return False
+    
+    def __str__(self):
+        return f"Verification for {self.user.email}"
+
+
+class PasswordReset(models.Model):
+    """Password reset tokens"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_resets')
+    token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=1)
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+    
+    @property
+    def is_used(self):
+        return self.used_at is not None
+    
+    def use(self):
+        """Mark the token as used"""
+        if not self.is_expired and not self.is_used:
+            self.used_at = timezone.now()
+            self.save()
+            return True
+        return False
+    
+    def __str__(self):
+        return f"Password reset for {self.user.email}"
 
 
 class Subject(models.Model):
