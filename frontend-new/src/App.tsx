@@ -12,6 +12,7 @@ import {
   Bot,
   CheckCircle2,
   AlertTriangle,
+  Plus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -28,11 +29,14 @@ import { ChatTab } from "@/components/tabs/ChatTab"
 import { Dashboard } from "@/components/tabs/Dashboard"
 import { SettingsTab } from "@/components/tabs/SettingsTab"
 import { AboutTab } from "@/components/tabs/AboutTab"
+import { MobileBottomNav, FloatingActionButton } from "@/components/MobileBottomNav"
+import { ToastProvider, useToast } from "@/components/Toast"
 import { api } from "@/lib/api"
 import type { User, Subject, Unit, Topic, Note, Mindmap, Flashcard, MCQ, UserProfile } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
-function App() {
+function AppContent() {
+  const { showToast } = useToast()
   const [user, setUser] = useState<User | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [subjects, setSubjects] = useState<Subject[]>([])
@@ -193,10 +197,10 @@ function App() {
           handleCompleteTopic(true)
         }
       } else {
-        alert("Topic marked as complete!")
+        showToast("🎉 Topic marked as complete!", "success")
       }
     } catch {
-      alert("Failed to mark complete")
+      showToast("Failed to mark complete", "error")
     }
   }
 
@@ -254,158 +258,218 @@ function App() {
         onSuccess={handleUploadSuccess}
       />
 
-      <div className="lg:ml-72 min-h-screen p-4 md:p-8 transition-all duration-300">
-        {/* Top Bar */}
+      <div className="lg:ml-72 min-h-screen pb-24 md:pb-8 transition-all duration-300">
+        {/* Top Bar - Optimized for mobile */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="flex justify-between items-center mb-8 bg-card p-4 rounded-2xl shadow-sm border"
+          className="sticky top-0 z-30 flex justify-between items-center p-3 md:p-4 mx-2 md:mx-4 mt-2 md:mt-4 mb-4 md:mb-8 bg-card/80 backdrop-blur-lg rounded-2xl shadow-sm border"
         >
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 min-w-0">
             <Button
               variant="ghost"
               size="icon"
               onClick={() => setIsSidebarOpen(true)}
-              className="lg:hidden"
+              className="lg:hidden flex-shrink-0 active:scale-90 transition-transform"
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <div>
-              <h1 className="text-xl md:text-2xl font-bold line-clamp-1">
+            <div className="min-w-0">
+              <h1 className="text-lg md:text-2xl font-bold truncate">
                 {selectedTopic ? selectedTopic.name : selectedSubject ? selectedSubject.name : "Welcome"}
               </h1>
               {selectedTopic && (
-                <p className="text-muted-foreground text-xs md:text-sm mt-0.5 line-clamp-1">
+                <p className="text-muted-foreground text-xs md:text-sm truncate">
                   {selectedSubject?.name}
                 </p>
               )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2 md:gap-4">
-            <Button variant="ghost" size="icon" onClick={toggleTheme}>
-              {theme === "light" ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
-            </Button>
-            {selectedTopic && (
-              <Button
-                variant="success"
-                onClick={() => handleCompleteTopic(false)}
-                className="hidden md:flex"
-              >
-                <CheckCircle2 className="h-4 w-4" /> Complete
+          <div className="flex items-center gap-1 md:gap-4 flex-shrink-0">
+            <motion.div whileTap={{ scale: 0.9, rotate: 15 }}>
+              <Button variant="ghost" size="icon" onClick={toggleTheme}>
+                {theme === "light" ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
               </Button>
+            </motion.div>
+            {selectedTopic && (
+              <motion.div whileTap={{ scale: 0.95 }}>
+                <Button
+                  variant="success"
+                  onClick={() => handleCompleteTopic(false)}
+                  className="hidden md:flex"
+                >
+                  <CheckCircle2 className="h-4 w-4" /> Complete
+                </Button>
+              </motion.div>
             )}
           </div>
         </motion.div>
 
-        {/* Usage Warning */}
-        <AnimatePresence>
-          {userProfile && !userProfile.has_api_key && (
+        <div className="px-3 md:px-8">
+          {/* Usage Warning */}
+          <AnimatePresence>
+            {userProfile && !userProfile.has_api_key && (
+              <motion.div
+                initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.95 }}
+              >
+                <Card className="bg-yellow-500/10 border-l-4 border-yellow-500 mb-4 md:mb-6 interactive-card">
+                  <CardContent className="p-3 md:p-4 flex items-start md:items-center gap-3">
+                    <AlertTriangle className="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5 md:mt-0" />
+                    <p className="text-xs md:text-sm">
+                      <strong>Note:</strong> Using shared quota ({userProfile.daily_usage}/3 topics).{" "}
+                      <button
+                        onClick={() => {
+                          setActiveTab("settings")
+                          setSelectedTopic(null)
+                        }}
+                        className="font-semibold underline hover:text-yellow-600"
+                      >
+                        Add Gemini API Key
+                      </button>
+                    </p>
+                  </CardContent>
+                </Card>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Main Content */}
+          {activeTab === "settings" ? (
+            <SettingsTab />
+          ) : activeTab === "about" ? (
+            <AboutTab />
+          ) : subjects.length === 0 ? (
+            <WelcomeScreen onUploadClick={() => setShowUploadModal(true)} />
+          ) : (
             <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="page-transition"
             >
-              <Card className="bg-yellow-500/10 border-l-4 border-yellow-500 mb-6">
-                <CardContent className="p-4 flex items-center gap-3">
-                  <AlertTriangle className="h-5 w-5 text-yellow-500" />
-                  <p className="text-sm">
-                    <strong>Note:</strong> You are using the shared system quota (
-                    {userProfile.daily_usage}/3 topics today).
-                    <button
-                      onClick={() => {
-                        setActiveTab("settings")
-                        setSelectedTopic(null)
-                      }}
-                      className="font-semibold underline hover:text-yellow-600 ml-1"
+              {/* Desktop Tab Navigation */}
+              {selectedTopic && (
+                <div className="hidden md:block mb-6 bg-card p-2 rounded-xl shadow-sm border overflow-x-auto">
+                  <div className="flex gap-2 min-w-max">
+                    {tabs.map((tab) => (
+                      <motion.div
+                        key={tab.id}
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        <Button
+                          variant={activeTab === tab.id ? "default" : "ghost"}
+                          size="sm"
+                          onClick={() => setActiveTab(tab.id)}
+                          className={cn(
+                            "gap-2 transition-all",
+                            activeTab === tab.id && "shadow-md"
+                          )}
+                        >
+                          <tab.icon className="h-4 w-4" />
+                          {tab.label}
+                        </Button>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="min-h-[500px]">
+                <AnimatePresence mode="wait">
+                  <motion.div
+                    key={activeTab}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    {activeTab === "dashboard" && <Dashboard subjectId={selectedSubject?.id} />}
+                    {activeTab === "notes" && selectedTopic && (
+                      <NotesTab topicId={selectedTopic.id} notes={notes} setNotes={setNotes} />
+                    )}
+                    {activeTab === "mindmap" && selectedTopic && (
+                      <MindmapTab topicId={selectedTopic.id} mindmap={mindmap} setMindmap={setMindmap} />
+                    )}
+                    {activeTab === "flashcards" && selectedTopic && (
+                      <FlashcardsTab
+                        topicId={selectedTopic.id}
+                        flashcards={flashcards}
+                        setFlashcards={setFlashcards}
+                      />
+                    )}
+                    {activeTab === "mcqs" && selectedTopic && (
+                      <MCQTab topicId={selectedTopic.id} mcqs={mcqs} setMcqs={setMcqs} />
+                    )}
+                    {activeTab === "chat" && selectedTopic && (
+                      <ChatTab topicId={selectedTopic.id} topicName={selectedTopic.name} />
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+
+                {!selectedTopic && activeTab !== "dashboard" && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="text-center py-16 md:py-20 flex flex-col items-center"
+                  >
+                    <motion.div
+                      className="w-16 h-16 md:w-20 md:h-20 bg-muted rounded-full flex items-center justify-center mb-4"
+                      animate={{ x: [0, -10, 0] }}
+                      transition={{ duration: 2, repeat: Infinity }}
                     >
-                      Add your own Gemini API Key for unlimited access
-                    </button>
-                  </p>
-                </CardContent>
-              </Card>
+                      <BookOpen className="h-8 w-8 md:h-10 md:w-10 text-muted-foreground" />
+                    </motion.div>
+                    <h3 className="text-lg md:text-xl font-bold">Select a topic to start learning</h3>
+                    <p className="text-muted-foreground mt-2 text-sm md:text-base">Choose from the sidebar</p>
+                  </motion.div>
+                )}
+              </div>
             </motion.div>
           )}
-        </AnimatePresence>
-
-        {/* Main Content */}
-        {activeTab === "settings" ? (
-          <SettingsTab />
-        ) : activeTab === "about" ? (
-          <AboutTab />
-        ) : subjects.length === 0 ? (
-          <WelcomeScreen onUploadClick={() => setShowUploadModal(true)} />
-        ) : (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-          >
-            {selectedTopic && (
-              <div className="mb-6 bg-card p-2 rounded-xl shadow-sm border overflow-x-auto">
-                <div className="flex gap-2 min-w-max">
-                  {tabs.map((tab) => (
-                    <Button
-                      key={tab.id}
-                      variant={activeTab === tab.id ? "default" : "ghost"}
-                      size="sm"
-                      onClick={() => setActiveTab(tab.id)}
-                      className={cn(
-                        "gap-2",
-                        activeTab === tab.id && "shadow-md"
-                      )}
-                    >
-                      <tab.icon className="h-4 w-4" />
-                      {tab.label}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="min-h-[500px]">
-              {activeTab === "dashboard" && <Dashboard subjectId={selectedSubject?.id} />}
-              {activeTab === "notes" && selectedTopic && (
-                <NotesTab topicId={selectedTopic.id} notes={notes} setNotes={setNotes} />
-              )}
-              {activeTab === "mindmap" && selectedTopic && (
-                <MindmapTab topicId={selectedTopic.id} mindmap={mindmap} setMindmap={setMindmap} />
-              )}
-              {activeTab === "flashcards" && selectedTopic && (
-                <FlashcardsTab
-                  topicId={selectedTopic.id}
-                  flashcards={flashcards}
-                  setFlashcards={setFlashcards}
-                />
-              )}
-              {activeTab === "mcqs" && selectedTopic && (
-                <MCQTab topicId={selectedTopic.id} mcqs={mcqs} setMcqs={setMcqs} />
-              )}
-              {activeTab === "chat" && selectedTopic && (
-                <ChatTab topicId={selectedTopic.id} topicName={selectedTopic.name} />
-              )}
-
-              {!selectedTopic && activeTab !== "dashboard" && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="text-center py-20 flex flex-col items-center"
-                >
-                  <motion.div
-                    className="w-20 h-20 bg-muted rounded-full flex items-center justify-center mb-4"
-                    animate={{ x: [0, -10, 0] }}
-                    transition={{ duration: 2, repeat: Infinity }}
-                  >
-                    <BookOpen className="h-10 w-10 text-muted-foreground" />
-                  </motion.div>
-                  <h3 className="text-xl font-bold">Select a topic to start learning</h3>
-                  <p className="text-muted-foreground mt-2">Choose from the sidebar on the left</p>
-                </motion.div>
-              )}
-            </div>
-          </motion.div>
-        )}
+        </div>
       </div>
+
+      {/* Mobile Bottom Navigation */}
+      <MobileBottomNav
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        onMenuClick={() => setIsSidebarOpen(true)}
+        hasSelectedTopic={!!selectedTopic}
+      />
+
+      {/* Floating Action Button for mobile */}
+      {subjects.length > 0 && !selectedTopic && activeTab === "dashboard" && (
+        <FloatingActionButton
+          onClick={() => setShowUploadModal(true)}
+          icon={Plus}
+          label="Add Subject"
+        />
+      )}
+
+      {/* Mobile Complete Button */}
+      {selectedTopic && (
+        <motion.button
+          initial={{ scale: 0 }}
+          animate={{ scale: 1 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={() => handleCompleteTopic(false)}
+          className="md:hidden fixed bottom-24 right-4 z-40 bg-success text-white p-3 rounded-full shadow-lg shadow-success/30"
+        >
+          <CheckCircle2 className="h-6 w-6" />
+        </motion.button>
+      )}
     </div>
+  )
+}
+
+function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
   )
 }
 
