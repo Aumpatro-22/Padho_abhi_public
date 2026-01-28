@@ -153,15 +153,16 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Serve React static assets (JS, CSS) via WhiteNoise
 STATICFILES_DIRS = []
-if REACT_APP_DIR.exists() and (REACT_APP_DIR / "assets").exists():
-    STATICFILES_DIRS.append(("assets", REACT_APP_DIR / "assets"))
+if REACT_APP_DIR.exists():
+    STATICFILES_DIRS.append(REACT_APP_DIR)
 
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# Use simpler storage for compatibility
+STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 # WhiteNoise config for serving React assets
 WHITENOISE_ROOT = REACT_APP_DIR if REACT_APP_DIR.exists() else None

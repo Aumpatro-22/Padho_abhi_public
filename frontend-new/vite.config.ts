@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: '/static/', // Serve assets from Django's static URL
   build: {
-    assetsDir: 'assets',
+    assetsDir: '', // Put assets directly in static folder
   },
   resolve: {
     alias: {
