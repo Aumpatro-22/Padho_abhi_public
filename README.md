@@ -40,6 +40,18 @@ $env:DATABASE_URL = "postgres://..."
 
 Django will automatically use this if found; otherwise, it falls back to `db.sqlite3`.
 
+### Neon Auth (JWT) Integration
+
+This project can accept Neon Auth JWTs for API requests. Configure these environment variables:
+
+```powershell
+$env:NEON_AUTH_JWKS_URL = "https://<your-neon-auth-domain>/.well-known/jwks.json"
+$env:NEON_AUTH_ISSUER = "https://<your-neon-auth-domain>/"  # optional
+$env:NEON_AUTH_AUDIENCE = "<your-audience>"                  # optional
+```
+
+When a Neon Auth access token is present in the browser, the frontend sends it as a `Bearer` token. The API will create a Django user on first request using the token claims.
+
 ### Deploy to Render
 
 1.  Push this repo to GitHub.
