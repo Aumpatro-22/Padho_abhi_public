@@ -126,7 +126,7 @@ export function MCQTab({ topicId, mcqs, setMcqs }: MCQTabProps) {
 
               let optionClass =
                 "border-2 border-border bg-card hover:border-primary/50 hover:bg-accent"
-              let icon = null
+              let icon: React.ReactNode = null
 
               if (showResult && result) {
                 if (opt === result.correct_option) {
