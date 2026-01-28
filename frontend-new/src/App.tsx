@@ -576,9 +576,7 @@ function AppRoutes() {
         path="/"
         element={
           <ProtectedRoute>
-            <MainLayout>
-              <Navigate to="/dashboard" replace />
-            </MainLayout>
+            <Navigate to="/dashboard" replace />
           </ProtectedRoute>
         }
       />
