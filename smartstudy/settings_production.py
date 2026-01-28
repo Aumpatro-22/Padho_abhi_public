@@ -5,6 +5,7 @@ SECURITY HARDENED - Use this for public deployment.
 
 import os
 from pathlib import Path
+import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -88,21 +89,32 @@ TEMPLATES = [
 WSGI_APPLICATION = "smartstudy.wsgi.application"
 
 # =============================================================================
-# DATABASE - Use PostgreSQL in production
+# DATABASE - Use PostgreSQL in production (Neon supported via DATABASE_URL)
 # =============================================================================
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get('DB_NAME', 'padhoabhi'),
-        "USER": os.environ.get('DB_USER', 'postgres'),
-        "PASSWORD": os.environ.get('DB_PASSWORD'),
-        "HOST": os.environ.get('DB_HOST', 'localhost'),
-        "PORT": os.environ.get('DB_PORT', '5432'),
-        "OPTIONS": {
-            "sslmode": os.environ.get('DB_SSLMODE', 'require'),
+if os.environ.get("DATABASE_URL", "").strip():
+    try:
+        DATABASES = {
+            "default": dj_database_url.config(
+                conn_max_age=600,
+                conn_health_checks=True,
+            )
+        }
+    except Exception as e:
+        raise ValueError(f"Invalid DATABASE_URL: {e}")
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get('DB_NAME', 'padhoabhi'),
+            "USER": os.environ.get('DB_USER', 'postgres'),
+            "PASSWORD": os.environ.get('DB_PASSWORD'),
+            "HOST": os.environ.get('DB_HOST', 'localhost'),
+            "PORT": os.environ.get('DB_PORT', '5432'),
+            "OPTIONS": {
+                "sslmode": os.environ.get('DB_SSLMODE', 'require'),
+            }
         }
     }
-}
 
 # Password validation - Keep all validators enabled
 AUTH_PASSWORD_VALIDATORS = [
@@ -136,6 +148,7 @@ CORS_ALLOW_CREDENTIALS = True
 # =============================================================================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'core.authentication.NeonJWTAuthentication',
         'rest_framework.authentication.TokenAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -150,6 +163,17 @@ REST_FRAMEWORK = {
         'user': '1000/hour'
     }
 }
+
+# =============================================================================
+# NEON AUTH SETTINGS
+# =============================================================================
+NEON_AUTH_URL = os.environ.get('NEON_AUTH_URL', '').rstrip('/')
+NEON_AUTH_JWKS_URL = os.environ.get('NEON_AUTH_JWKS_URL', '').strip()
+if NEON_AUTH_URL and not NEON_AUTH_JWKS_URL:
+    NEON_AUTH_JWKS_URL = f"{NEON_AUTH_URL}/.well-known/jwks.json"
+NEON_AUTH_ISSUER = os.environ.get('NEON_AUTH_ISSUER', NEON_AUTH_URL or '')
+NEON_AUTH_AUDIENCE = os.environ.get('NEON_AUTH_AUDIENCE', '').strip()
+NEON_AUTH_JWKS_CACHE_TTL = int(os.environ.get('NEON_AUTH_JWKS_CACHE_TTL', '300'))
 
 # =============================================================================
 # API KEYS - Get from environment variables

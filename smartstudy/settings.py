@@ -29,10 +29,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-m7_eo2cncht*+ke%yb&vow(%ik&rb_b#e%kwpcbd-^s_2&m#c="
+SECRET_KEY = os.environ.get('SECRET_KEY', "django-insecure-m7_eo2cncht*+ke%yb&vow(%ik&rb_b#e%kwpcbd-^s_2&m#c=")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
 ALLOWED_HOSTS = ['*']  # Allow all hosts for now to simplify deployment
 
@@ -66,10 +66,16 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = "smartstudy.urls"
 
+# React frontend directory (built files)
+REACT_APP_DIR = BASE_DIR / "frontend-new" / "dist"
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "frontend"],
+        "DIRS": [
+            REACT_APP_DIR,  # React build output
+            BASE_DIR / "frontend",  # Legacy frontend (fallback)
+        ],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -149,7 +155,16 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Serve React static assets (JS, CSS) via WhiteNoise
+STATICFILES_DIRS = []
+if REACT_APP_DIR.exists() and (REACT_APP_DIR / "assets").exists():
+    STATICFILES_DIRS.append(("assets", REACT_APP_DIR / "assets"))
+
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# WhiteNoise config for serving React assets
+WHITENOISE_ROOT = REACT_APP_DIR if REACT_APP_DIR.exists() else None
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -163,6 +178,7 @@ CORS_ALLOW_CREDENTIALS = True
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'core.authentication.NeonJWTAuthentication',
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
@@ -170,6 +186,15 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ]
 }
+
+# Neon Auth settings (optional)
+NEON_AUTH_URL = os.environ.get('NEON_AUTH_URL', '').rstrip('/')
+NEON_AUTH_JWKS_URL = os.environ.get('NEON_AUTH_JWKS_URL', '').strip()
+if NEON_AUTH_URL and not NEON_AUTH_JWKS_URL:
+    NEON_AUTH_JWKS_URL = f"{NEON_AUTH_URL}/.well-known/jwks.json"
+NEON_AUTH_ISSUER = os.environ.get('NEON_AUTH_ISSUER', NEON_AUTH_URL or '')
+NEON_AUTH_AUDIENCE = os.environ.get('NEON_AUTH_AUDIENCE', '').strip()
+NEON_AUTH_JWKS_CACHE_TTL = int(os.environ.get('NEON_AUTH_JWKS_CACHE_TTL', '300'))
 
 # Gemini API Key - Prefer environment variable for security
 # Local dev fallback (not recommended in production; set in .env or environment variables instead)
